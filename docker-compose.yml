@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  db:
+    image: postgis/postgis:15-3.3
+    container_name: rytm_db
+    environment:
+      POSTGRES_DB: rytm_db
+      POSTGRES_USER: rytm_user
+      POSTGRES_PASSWORD: rytm_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+
+volumes:
+  postgis_data:

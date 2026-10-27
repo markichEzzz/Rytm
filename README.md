@@ -151,7 +151,12 @@ POST /api/events/
 ```
 
 #### GET /api/events/
-Returns approved events.
+Returns approved, non-expired events ordered by start_time. If end_time exists,
+the event remains visible through end_time (including ongoing events); otherwise
+it remains visible through start_time. Both boundaries are inclusive and use timezone-aware time.
+
+`GET /api/events/{id}/` returns an approved event, including historical approved events.
+Missing, pending, and rejected IDs return 404. This detail behavior preserves access to existing approved links.
 
 Optional query parameters:
 - `category=<category_name>`
@@ -168,7 +173,11 @@ This filters events to a bounding box on the map.
 #### POST /api/events/
 Creates a new event request.
 
-The backend automatically sets the created event status to `pending`.
+The backend chooses `approved` or `pending` synchronously using the policy below.
+Authentication is required (`Authorization: Bearer ACCESS_TOKEN`). Submit multipart fields,
+including required photo and `location=POINT(longitude latitude)`. Latitude/longitude in responses
+are read-only projections of location. Status and organizer are read-only; supplied values cannot bypass moderation.
+Price, end_time, source_url, and organizer may be null; price is serialized as a decimal string.
 
 ## Example event response
 
@@ -200,8 +209,8 @@ This project is a backend for an event-discovery application. In simple terms, i
 2. The API reads the event data from PostgreSQL/PostGIS.
 3. Events are filtered by category or by map bounds before they are returned.
 4. Organizers can submit new events through the API.
-5. New events are saved with a `pending` status.
-6. A moderator or admin approves the event in Django admin.
+5. Verified organizer events that qualify are automatically approved; other valid events are pending.
+6. A moderator or admin can approve, reject, or edit events in Django admin.
 7. Once approved, the backend sends a push notification through Firebase.
 8. Users receive the notification and can open the event in the mobile/web app.
 
@@ -218,8 +227,9 @@ This project is a backend for an event-discovery application. In simple terms, i
 - An organizer signs in using the JWT token endpoints
 - The organizer sends `POST /api/events/`
 - The API validates the payload with `EventSerializer`
-- The event is created with `status='pending'`
-- The event is not shown publicly until it is approved
+- The server applies the account cooldown and automatic moderation policy
+- Qualifying verified organizers receive `approved`; other valid submissions receive `pending`
+- Pending events stay private until an admin approves them
 
 ### Moderation flow
 
@@ -277,30 +287,43 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Start the PostGIS database
+### 4. Configure the ignored local environment
 
-```bash
-docker-compose up -d db
+Create `.env` in this repository before starting Compose. For local development,
+use the following variable names and replace the password placeholder with a new,
+unique local-only password:
+
+```dotenv
+ENVIRONMENT=development
+DJANGO_DEBUG=true
+POSTGRES_DB=rytm_db
+POSTGRES_USER=rytm_user
+POSTGRES_PASSWORD=your_local_password
+POSTGRES_HOST=127.0.0.1
+POSTGRES_PORT=5432
+DATABASE_URL=
 ```
 
-This creates a local PostgreSQL database named `rytm_db` with the user `rytm_user` and password `rytm_password`.
+Keep `.env` private (`chmod 600 .env`); never commit it. `.env.example` is a
+production-oriented template, so do not use its production mode unchanged for
+local development. Add your private Cloudinary/Google configuration as needed.
 
-### 5. Configure environment variables
-
-The project reads settings such as `SECRET_KEY` and `DEBUG` from environment variables.
-
-Example:
+### 5. Start the PostGIS database
 
 ```bash
-export SECRET_KEY="your-secret-key"
-export DEBUG="True"
+docker compose up -d db
 ```
 
-If you want to use a database URL instead of the local Postgres settings, you can set:
+Compose requires `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` from
+`.env`. An existing database volume retains its current role password: changing
+`.env` alone does not rotate it. Update the local PostgreSQL role password and
+the ignored environment together; do not delete the volume to change credentials.
 
-```bash
-export DATABASE_URL="postgis://rytm_user:rytm_password@127.0.0.1:5432/rytm_db"
-```
+Django gives a nonempty `DATABASE_URL` precedence over `POSTGRES_*`. Leave it
+empty for the local database. If your private `.env` already contains an external
+Supabase URL, preserve it and explicitly use `DATABASE_URL= python manage.py ...`
+for local commands (with the correct local `POSTGRES_*` values). Never run local
+tests or migrations against an external database by accident.
 
 ### 6. Run migrations
 
@@ -348,6 +371,53 @@ This is designed for a mobile app that subscribes to that topic.
 - The app is designed for map-based location filtering and event approval workflows.
 - For production deployment, you should replace the default secret key and review security settings in `rytm/settings.py`.
 
+## Configuration and production preparation
+
+Configuration loads the ignored `.env` for local development. Never commit `.env`,
+Cloudinary credentials, or firebase-key.json. The old tracked local development database password
+is absent from current source. Git history still contains the former development
+value; it must be retired by rotating the local database role and must never be
+reused anywhere. An already initialized Docker volume keeps its existing
+credentials even if `.env` changes.
+
+Local database variables: POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, optional POSTGRES_HOST and POSTGRES_PORT.
+Compose requires the first three. Application secrets use SECRET_KEY, CLOUDINARY_CLOUD_NAME,
+CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.
+
+For production set ENVIRONMENT=production, DEBUG=False, a random SECRET_KEY of at least 50 characters,
+ALLOWED_HOSTS as comma-separated backend hostnames, DATABASE_URL, and all three Cloudinary variables.
+Startup rejects missing production configuration, wildcard hosts, DEBUG, and insecure keys.
+DATABASE_URL uses the PostGIS backend; the target database must have the PostGIS extension enabled.
+DATABASE_SSL_REQUIRE defaults to true; change it only when the database connection setup requires it.
+The host must also provide the native GEOS/GDAL libraries required by GeoDjango.
+
+Native Retrofit does not need browser CORS; django-cors-headers was deliberately not added.
+CSRF_TRUSTED_ORIGINS defaults to empty. Configure only concrete trusted HTTPS origins if needed for admin requests.
+Production uses secure session/CSRF cookies, HTTPS redirects, and one-hour HSTS.
+Set TRUST_PROXY_SSL_HEADER=true only behind a trusted proxy that controls X-Forwarded-Proto;
+Railway HTTPS termination needs this to avoid redirect loops. See [Django settings](https://docs.djangoproject.com/en/6.1/ref/settings/#secure-proxy-ssl-header).
+
+Configure `python manage.py migrate --noinput` as the Railway service pre-deploy command.
+`sh start.sh` runs collectstatic and serves `rytm.wsgi:application` with Gunicorn on PORT.
+Gunicorn and WhiteNoise are already pinned in requirements.txt. Static assets go to STATIC_ROOT;
+event photos use Cloudinary. Set environment variables in the service before deployment.
+See [Railway Django guidance](https://docs.railway.com/guides/django).
+Use these service commands when creating the deployment. Railway's former railway.json format is
+deprecated, so this project does not add it. See [Railway configuration reference](https://docs.railway.com/config-as-code/reference).
+This prepares deployment; no service has been deployed.
+
+Verification commands:
+
+```bash
+source venv/bin/activate
+python manage.py check
+python manage.py test events --noinput
+python manage.py makemigrations --check --dry-run
+```
+
+Tests use relative dates and temporary local image storage, so they do not upload to Cloudinary.
+Migration `0002_submission_moderation` adds submission tracking and optional organizer-account links; apply it with `python manage.py migrate`.
+
 ## Useful commands
 
 Create a superuser:
@@ -371,3 +441,943 @@ http://localhost:8000/admin/
 ## License
 
 This project does not currently include a license file. If you plan to share or publish it, add an appropriate license before distribution.
+
+## Submission validation and automatic moderation
+
+JWT authentication remains unchanged. The API now rejects invalid submissions with HTTP 400:
+blank required text, invalid category/photo/URL, negative or invalid decimal prices, non-future
+start_time, end_time before start_time, and invalid coordinates. Location must be a finite,
+2D WGS84 POINT(longitude latitude), within global geographic ranges. Optional price/end remain nullable;
+empty price means unknown; zero is free. The additive `price_status` field distinguishes
+`paid`, `free`, and `unknown`. Event dates must contain a UTC offset; Android supplies UTC.
+
+Automatic approval runs synchronously in `events/moderation.py`, after serializer validation and cooldown:
+
+- The authenticated account must be active and linked to an Organizer with verified=True.
+- Title is 5–255 trimmed characters; description is 20–10,000 trimmed characters; address is at least 5 trimmed characters.
+- Category, non-negative price, photo, source URL and coordinates must pass API validation.
+- Start is in the future; optional end is strictly later than start for auto-approval.
+- Coordinates lie inclusively within Lviv: longitude 23.90–24.15, latitude 49.77–49.90.
+
+A valid request that misses these approval criteria is saved as pending (HTTP 201), including
+unlinked/unverified accounts, short descriptions, out-of-region locations, and end equal to start.
+Invalid data is HTTP 400 and creates no event. Client-supplied organizer/status/history fields cannot
+change attribution or bypass the decision. The response keeps the existing public fields and returns the resulting status.
+
+In Django admin, link an existing organizer profile to its user account, then mark verified only
+for accounts you trust. Existing organizer profiles are not automatically linked or trusted by migration.
+Admins retain editing and individual moderation; actions approve, mark pending, or reject selections.
+Approval notifications run only after the transaction commits, for both auto-approval and manual approval.
+This is a structural/trust policy, not content moderation; verified accounts must still be reviewed responsibly.
+
+Every successful API submission, approved or pending, records submitted_by and created_at.
+The next submission from that account is allowed at created_at + exactly 3 hours. Earlier attempts return
+HTTP 429 with a human-readable remaining interval and Retry-After seconds. The server locks the user row
+inside a transaction so two workers cannot accept simultaneous first submissions. Failed validation/uploads
+create no cooldown record. Different accounts have independent cooldowns.
+
+Migration 0002 adds Event.created_at, Event.submitted_by, a latest-submission index, and optional
+Organizer.user (one-to-one with the existing Django user). Historical events receive a migration-time
+created_at but retain submitted_by=NULL, since prior submitters cannot be inferred reliably.
+Do not delete recent submission records if you need their cooldown history: deleting the latest event
+can shorten/reset that account's cooldown. A separate retained submission audit record is a later hardening option.
+
+## Source ingestion and manual review
+
+The ingestion app adds a private pipeline:
+
+```text
+SourceAccount → RawSourceItem → extraction → EventCandidate → admin approval → Event → Android feed/map
+```
+
+`Event` remains the only public event model. Neither raw records nor candidates have API routes or
+appear in `/api/events/`. Android and the existing Event serializer are unchanged.
+
+- **SourceAccount:** editable platform/username, display name, URL, enabled flag and check timestamp.
+  Instagram usernames are unique per platform, ignoring case. Add accounts in Django admin under
+  **Source ingestion and review → Source accounts**. Toggle enabled individually or in the list.
+  Disabling prevents new ingestion; existing candidates can still be reviewed.
+- **RawSourceItem:** original caption, image URL, JSON metadata and timestamps retained for audit.
+  Source/external ID is unique. `store_collected_item()` preserves the first snapshot on repeated imports.
+  Saved raw content is read-only in admin; extraction status remains editable. A source/raw item with
+  dependent audit records cannot be deleted accidentally.
+- **EventCandidate:** editable extracted facts, optional confidence/notes, internal description/image
+  reference, review status/audit and one-to-one link to its published Event. Multiple candidates may
+  reference one raw post. Extraction never publishes images; approval can copy the primary image
+  only with explicit moderator authorization. CDN URLs are never assigned to Event.photo.
+
+Apply the additive migration `ingestion/0001_initial.py` and seed the 21 initial accounts:
+
+```bash
+python manage.py migrate
+python manage.py seed_source_accounts
+```
+
+The seed list is data in `ingestion/data/instagram_sources.json`, not collector business logic.
+Repeated seeding preserves existing edits and disabled accounts. Future sources are added in admin;
+seeding does not contact Instagram or check whether a username exists.
+
+Create a synthetic raw item and candidate for an enabled configured account, without network access:
+
+```bash
+python manage.py ingest_test_event
+# Optional: use a different configured account or create another test item:
+python manage.py ingest_test_event --username jamfactory.artcenter --external-id local-test-2
+```
+
+The command is idempotent for the same account/external ID and never creates an Event. Facts are
+explicit test values dated seven days ahead, not parsed captions. Repeating the command preserves
+moderator edits; adjust dates if the existing test candidate becomes old.
+
+In **Event candidates** admin, filter/search by source, status, category, date, title or address:
+
+1. Open the candidate and compare its extracted facts with the read-only raw caption.
+2. Correct title, dates, venue/address, price, category and source URL. Click the location map or drag
+   its marker to set latitude/longitude; numeric edits also move the marker. Save the candidate.
+3. Upload an authorized **Public photo**, or explicitly check **Use source image as public event photo**
+   and save. Manual uploads take priority. Neither extraction nor bulk approval implies authorization.
+4. Check the generated factual description and possible duplicate preview. Candidate `description`
+   is an internal draft; publication always uses `build_candidate_description()` from facts only.
+5. Select **Approve selected candidates**, **Reject selected candidates**, or **Mark selected candidates
+   as duplicate**. Rejected/duplicate candidates can be returned to review after corrections.
+
+Approval requires an active staff reviewer with candidate-change and Event-add permissions. It validates
+required title, future start, address, category, finite WGS84 coordinates within supported Lviv bounds,
+price, optional end and photo;
+then creates an approved normal Event, links the candidate and records reviewer/time in one transaction.
+Source URL comes from the candidate or its raw item. Dates, price/category and coordinates are preserved;
+venue is included in the original factual description because Event has no separate venue field.
+The price contract distinguishes unknown (null), explicitly free (zero), and paid (positive amount).
+Unknown price does not block approval; reviewers must verify any extracted amount.
+Long source URLs must fit the existing Event URL limit (200 characters); approval reports validation
+rather than truncating them. Published candidates are read-only; later public edits happen in Events admin.
+Bulk approval reports individual failures and continues other items. Repeating approval returns the same
+Event; deleting a linked Event does not reset the approved candidate or allow accidental republication.
+Ingestion approval sends no push notification; existing organizer/Event moderation behavior is preserved.
+
+The admin map uses locally vendored Leaflet 1.9.4 (MIT) with OpenStreetMap tiles and attribution,
+isolated in `ingestion/static/ingestion/`. It centers on existing coordinates, otherwise Lviv
+(49.8397, 24.0297). Django form and approval validation remain authoritative. No API key is needed.
+Tiles send only the site's origin as their referrer, as required by OSM's tile policy; private
+candidate paths are omitted. With `DEBUG=False`, run `python manage.py collectstatic --noinput`
+and restart the local server after changing these static assets.
+The primary candidate image, falling back to the raw item's primary image, appears only in admin
+with a bounded aspect-preserving preview and link. Missing or expired images show a manual-upload message.
+
+Migration `0003_eventcandidate_source_photo_authorized_at_and_more` persists the explicit opt-in
+and its staff/time audit because moderators save a candidate before approving it later, including
+through bulk actions. Existing candidates default to no authorization. Approved records are read-only.
+During approval only, an opted-in source image uses the existing defensive OCR downloader (HTTPS
+Instagram CDN hosts, no redirects, JPEG/PNG/WebP MIME, 5 MiB maximum, bounded timeouts). Pillow validates
+decoded content and the 16-million-pixel limit, then creates a metadata-free JPEG with a UUID filename.
+`Event.photo.save()` writes the copy through configured Django storage (Cloudinary when configured).
+The public Event references that stored copy, so CDN expiry afterwards is irrelevant. Download/storage
+failures leave the candidate unapproved with a manual-upload error and no partial Event. Database
+failures roll back approval and attempt deletion of only the newly stored copy. Repeated approval does
+not download or upload again. Tests use local temporary storage and mocked network requests.
+
+Duplicate checks compare non-rejected Events within an inclusive 30-minute start-time window. Unicode
+normalization, case folding, punctuation and whitespace normalization are applied to title/address.
+Identical normalized title/address, or similarity of at least 90% for **both** fields, blocks approval,
+marks the candidate duplicate and retains raw data and an Event ID in notes. PostgreSQL transaction and
+row locks serialize candidate approvals, including reposts from different accounts. There is no force
+publish action. Correct false matches and return to review; later tooling can support an audited override.
+The heuristic can miss renamed events/different addresses; ordinary organizer submissions do not use
+this ingestion lock or duplicate policy.
+
+`ingestion/collectors.py` defines `SourceCollector` and the normalized `CollectedSourceItem` DTO.
+`ingestion/extraction.py` implements the separate factual extraction/candidate boundary. The offline
+test-ingestion command still supplies synthetic facts directly to exercise manual review.
+
+Instagram metadata collection and deterministic factual extraction are available through separate
+boundaries described below. Optional text-only LLM extraction is available alongside deterministic parsing. Future work includes
+scheduled collection and richer OCR layout support. External image copying and automatic publication are absent. Manual-session browser collection is described below. Any future extractor must retain private raw data
+and generate original public prose from reviewed facts.
+
+Run ingestion tests (including concurrent approval), then all backend tests:
+
+```bash
+python manage.py check
+python manage.py test ingestion --noinput
+python manage.py test --noinput
+```
+
+Tests use relative dates and local photo paths/storage, never external image downloads or cloud uploads.
+The test database is built with all migrations, including the ingestion migration.
+
+
+## Instagram collection (raw records only)
+
+`ingestion/providers/instagram.py` implements the existing `SourceCollector.fetch_items()` boundary
+using Instaloader **4.15.3**, with normalized `CollectedSourceItem` values. Instaloader is the only added
+dependency for this adapter; it uses the existing Requests dependency. A separate Playwright adapter is
+available as described below. This is public web metadata access, not an
+integration with the official Meta API. See the [Instaloader module documentation](https://instaloader.github.io/as-module.html).
+The Instaloader path has no media download calls, browser automation, private-account collection, extraction
+calls, EventCandidate creation or public Event creation.
+
+Install dependencies using the backend virtual environment, then run manually:
+
+```bash
+pip install -r requirements.txt
+python manage.py collect_instagram --username festrepublic --limit 3 --dry-run
+python manage.py collect_instagram --username festrepublic --limit 5
+# Process all enabled configured Instagram sources:
+python manage.py collect_instagram
+```
+
+Only enabled `SourceAccount(platform="instagram")` rows are eligible. `--username` must match an
+existing enabled source (case-insensitive, optional leading @); arbitrary usernames are rejected.
+`--limit` defaults to 5 and accepts 1–20. The adapter scans at most that many profile posts and returns
+only posts published within the last 14 days. Older pinned posts consume scan slots; it does not crawl
+history to fill the limit or assume posts are chronologically sorted. Instagram may return a page-sized
+metadata batch even when the scan limit is smaller. This is a bounded recent window, not a complete
+archive/backfill, and busy accounts may have posts omitted between runs.
+
+The collector maps shortcode, canonical post URL, caption, UTC-aware publication time, source image
+URL and a small allowlist of public debug metadata (provider, media ID/type, shortcode, source username,
+video flag). Images are referenced internally only and are never copied to Cloudinary. No captions or
+source images are added to the Android feed. Newly persisted raw records have extraction status `new`.
+Existing source/external IDs are skipped without replacing the original caption, image, metadata,
+fetched timestamp or extraction status; this preserves the original audit snapshot and moderator work.
+RawSourceItem admin includes a compact caption preview.
+
+`--dry-run` performs the same bounded metadata fetch and prints counts only: it creates no raw rows,
+updates no timestamps and never prints raw captions, image URLs, passwords, cookies or HTTP responses.
+The final summary reports processed sources, fetched items, new raw items, existing items skipped and
+failures. Dry-run new/existing persistence counts are zero. A command with any failed source finishes
+remaining sources, reports failures and exits nonzero for reliable manual/script visibility.
+
+A successful persisted collection (including zero posts) updates `last_checked_at` to the attempt start
+time. Failed attempts leave it unchanged and are reported in sanitized command/log messages. Dry-runs
+also leave it unchanged. One source is persisted atomically; invalid items roll back that source's raw
+rows and timestamp, while other sources continue. A source disabled while fetching is not persisted.
+A failure never disables a source automatically. There are no new model fields or migrations.
+
+Run this manually at most about once every two hours; there is no scheduler, daemon or background
+worker. The command pauses two seconds between sources and retains Instaloader's normal request
+pacing. Each request allows one attempt with a 20-second timeout. HTTP 400/401/403/404/429 are fatal
+for the request; there is no retry, fallback scraper, CAPTCHA solving, stealth or proxy rotation.
+An account not found/private account is isolated. A login requirement, challenge or rate block stops
+further network attempts for the current run; other sources are reported as unavailable rather than
+repeatedly requesting blocked endpoints. There is no automatic cooldown enforcement between separate
+manual command invocations, so operators must respect the documented frequency.
+
+No environment variables are required for anonymous access. Instagram may require authentication;
+optional environment variables (already loaded from the backend's ignored `.env`) are:
+
+- `INSTAGRAM_USERNAME`: login account, separate from the configured source username.
+- `INSTAGRAM_PASSWORD`: password for a single non-interactive login per command.
+- `INSTAGRAM_SESSION_FILE`: explicit path to an existing trusted Instaloader session file. Requires
+  `INSTAGRAM_USERNAME` and takes precedence over the password. A missing/broken session fails clearly
+  without falling back to repeated logins. Only load a session you created and trust.
+
+The command never prompts, saves credentials to the database or writes sessions. Two-factor/challenge
+flows are not implemented. Reuse a valid local session if your account requires them. Keep sessions
+inside the gitignored `.instagram/` directory (or a secure external location), restrict file permissions,
+and never commit them. Library errors/response bodies are suppressed; failures log safe summaries only.
+
+Current limitations: Instagram's public web endpoints can change, require login, expire image URLs or
+block even low-volume requests. An unavailable provider fails clearly; collection is not guaranteed.
+Captions/dates/images may be absent, profile ordering/pinning may hide recent posts within the limit,
+and story-only/reel-specific feeds are not collected. Metadata collection remains separate from the
+separate factual extractor. Future Telegram/web adapters can return the same DTO and reuse raw persistence.
+
+Automated tests mock Instagram and reject accidental HTTP calls; run:
+
+```bash
+python manage.py check
+python manage.py test ingestion.test_instagram --noinput
+python manage.py test --noinput
+```
+
+Only perform a single low-volume live dry-run when local credentials/session are available; do not run
+a live multi-account collection as part of verification.
+
+
+## Event extraction (private candidates only)
+
+Run collection and extraction separately; neither command schedules or starts the other:
+
+```text
+RawSourceItem → deterministic preprocessing/parsing → optional provider → strict validation
+             → EventCandidate(status=new) → human admin review → existing Event approval
+```
+
+`ingestion/extractors/contracts.py` defines typed `ExtractionContext`, `ExtractionResult`, the
+`EventExtractionProvider` protocol, an exact JSON schema and a factual-extraction prompt.
+The contract requires a boolean event decision, finite confidence in [0,1], bounded text, timezone-aware
+timestamps, ordered start/end, a finite nonnegative Decimal price with at most two fractional digits,
+and categories mapped to existing Event choices. Mapping responses must contain exactly the schema
+fields; unknown values can be null. Naive timestamps, malformed fields and extra keys are rejected.
+Unknown categories are left unresolved rather than invented. Provider timestamps are normalized to Kyiv.
+
+`ingestion/extractors/parsers.py` preprocesses Unicode/spacing/apostrophes and separates caption URLs.
+Original raw content is never modified. The raw post URL remains the candidate's source URL; promotional
+links inside captions do not replace provenance. Deterministic parsing supports:
+
+- Ukrainian genitive month dates (`11 жовтня`, optional explicit year), numeric day/month forms
+  (`11.10`, `11/10`, optional year), `сьогодні`, `завтра`, `післязавтра`, and `у/в` plus weekday names.
+- Colon times (`о 19:00`, `19:30`, `з 18:00`) and explicit ranges (`18:00–22:00`, `з 18:00 до 22:00`).
+  A range ending earlier on the clock is explicitly treated as crossing midnight; no duration is invented.
+- UAH prices (`500 грн`, `500₴`, `від 700 грн`, `700 UAH`, grouped thousands/decimal comma), and
+  explicit free admission (`free`, `безкоштовно`, `вхід вільний`). Unknown/conflicting prices remain null;
+  minimum/base prices are noted. Negative prices fail validation.
+- Explicit `Подія:`, `Назва:`, `Концерт:` labels and standalone `Artist live.` lines for titles;
+  explicit `Місце:`, `Локація:`, `Venue:`, `зустрічаємось у ...` and `Адреса:` labels for venue/address.
+- Live musical concerts/bands/jazz → `concert`; workshops/classes/lectures → `education`;
+  theatre/cinema screenings → `performance`; DJ nights/raves/parties/standup → `party`.
+  Bare `live` is ambiguous. Exhibition → `museums`; excursion → `routes`. The provider
+  category mapping also handles food → `restaurants`. Theatre/culture/other have no precise existing
+  fallback and remain unresolved. No category values are added.
+
+Relative dates are anchored to `published_at` in Europe/Kyiv, falling back to the current time if absent,
+with a note. Missing years use the publication-context year, with next-year rollover only for a January
+date referenced by a December post. Old October posts are not silently advanced by a year. Multiple dates
+or times remain unresolved. Invalid explicit dates/times fail; resolved past events are ignored.
+Kyiv's zone database supplies the UTC offset; nonexistent spring DST times and ambiguous fall clock
+repeats are left unresolved for manual correction. Weekday dates include an uncertainty note.
+
+Deterministic confidence is a simple completeness score: resolved date/time 0.50, clear title 0.20,
+venue 0.10, category 0.10, explicit price 0.10. Missing start/title limits confidence to 0.55; weekday
+uncertainty limits deterministic confidence to 0.70. These are review hints, not calibrated probabilities:
+>=0.85 high, 0.60–0.84 medium, <0.60 low. Confidence never triggers approval. Incomplete candidates may
+lack title, start, category/address or coordinates and must be corrected before approval.
+
+The provider receives publication and source display/username context as hints, never factual authority.
+Source names do not prove venue/address. The text-only hybrid provider can select evidenced facts among
+ambiguous deterministic observations, but all conflicts stay flagged for manual review. Unknown model
+fields stay null; unsupported facts are removed locally. Descriptions are regenerated as original factual
+templates; source prose and model drafts are never copied directly into public descriptions.
+
+The project default and preferred local configuration is `EVENT_EXTRACTION_PROVIDER=openai`
+with `EVENT_EXTRACTION_MODEL=gpt-6-luna`. OpenAI provides structured semantic extraction
+through the Responses API and requires the existing `OPENAI_API_KEY`. Explicit provider/model
+configuration overrides these defaults; failures never substitute a different model or automatically
+select Ollama. OpenAI failures use the existing deterministic/manual-review fallback.
+Choose `EVENT_EXTRACTION_PROVIDER=deterministic` explicitly for offline conservative parsing
+(OCR may separately download a private poster). Changing model changes the cache key.
+No Python SDK dependency was added: the adapter uses the existing Requests package.
+
+For local text inference, select Ollama instead. In `.env`, set:
+
+```dotenv
+EVENT_EXTRACTION_PROVIDER=ollama
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=llama3.1:8b
+# Optional: seconds; default 180, allowed range 1–600.
+OLLAMA_READ_TIMEOUT=180
+```
+
+Start Ollama separately and install the selected model (`ollama pull llama3.1:8b`).
+Django calls `POST /api/chat` over HTTP; it never invokes the Ollama CLI.
+`OPENAI_API_KEY` and `EVENT_EXTRACTION_MODEL` are unnecessary when Ollama is selected.
+The default base URL addresses the backend host's loopback interface; for a container
+backend, configure the reachable Ollama service URL instead.
+
+Ollama uses the same bounded caption/OCR context, factual prompt, multi-event JSON
+schema, and local validation/normalization as OpenAI. It sends no images or private
+metadata. Tesseract still handles OCR. Requests use a 5-second connection timeout,
+the configured read timeout, no redirects/retries, and a 256-KiB response limit.
+Unavailable servers, missing models, timeout, malformed JSON, and schema failures
+produce sanitized diagnostics and the existing deterministic/manual-review fallback.
+Repair retries preserve moderator edits and candidate identity; provider failures
+cannot become successful incomplete repairs. Dry-run output includes model response
+time when a request occurs; cached results and complete preserved rows need no inference.
+
+Preview existing incomplete Telegram candidates without saving changes:
+
+```sh
+EVENT_EXTRACTION_PROVIDER=ollama python manage.py extract_events \
+  --source kudypity_lviv --platform telegram --limit 5 --reextract --dry-run
+```
+
+The API request contains only caption (maximum 8,000 characters), OCR (16,000 characters), source
+platform/username/display-name, publication/reference/current timestamps, Europe/Kyiv timezone,
+deterministic date/time/price observations and factual result, and allowed backend categories.
+**Poster images, image URLs, cookies, sessions, browser data and unrelated raw_metadata are NOT sent
+to the LLM.** Account context never substitutes for source evidence. Text truncation is reported and
+confidence reduced. The endpoint is fixed to OpenAI; responses request `store=false`, no tools or images.
+
+The strict schema extends `ExtractionResult` with `event_count`, `needs_review`, `ambiguities` and
+per-field `evidence` (literal caption/OCR quotes). All fields are required and additional properties
+are forbidden. Dates must be aware ISO timestamps, price a nonnegative decimal string, category an
+allowed value or null. Local validation checks each quoted source fragment, literal title/venue/address,
+date/time against quoted evidence, and explicit price/free/minimum-price statements. Quotes are evidence
+of presence, not proof of semantic correctness; moderators must still inspect the original sources.
+OCR-only evidence, conflicts, missing fields, unknown category, truncation and review ambiguity cap
+confidence. Model confidence is a review hint, never a calibrated probability or publication trigger.
+
+There is normally at most one API request per raw item, with 5-second connect/90-second read timeout,
+a 120-second stream deadline, 256 KiB response cap and 18,000 output-token cap; no automatic retries.
+Missing key/model, unknown provider, HTTP error, refusal, timeout or invalid JSON/schema falls back to
+deterministic facts with a safe note. No source text, credentials or raw provider responses are logged.
+
+The provider now returns a strict multi-event envelope:
+`{is_event, events: [...], overall_notes, needs_review}`. Each of up to 50 events carries
+its own factual fields, confidence, ambiguities and quoted evidence. The detected count is
+**derived from the array**, including entries rejected into private review summaries. Legacy
+single-event provider results remain supported. The schema/cache version changed so old
+count-only responses are not reused for the new array contract.
+
+Each event is validated independently. A candidate requires a title and an explicitly evidenced,
+valid **future** start date/time; a missing venue/address/category/price can remain unknown for
+moderators to complete. Invalid categories become null, confidence is clamped locally, and
+invalid/missing evidence removes the affected fact. One malformed or incomplete entry does not
+discard valid siblings. Unresolved entries remain in private `raw_metadata.event_extraction`
+with reasons and bounded factual summaries. Every created candidate is `status=new`. Independent
+original factual descriptions are generated for each event, never the full source caption.
+
+Venue/address/price/date evidence is event-specific; source account identity cannot establish
+location. Shared fields require explicit source-wide wording and quoted support on each event.
+Local validation rejects field quotes borrowed from a different clearly separated program paragraph.
+Unstructured OCR layout still requires semantic/human review: quote presence alone does not prove
+relationships. Explicit multi-day ranges remain one event; start/end clocks must be supplied and
+the end must follow the start. Date ranges without clock evidence stay unresolved.
+
+`EventCandidate.raw_source_item` was already a many-to-one foreign key. Migration
+`0002_eventcandidate_source_fingerprint_and_more` adds a readonly 64-character fingerprint and a
+conditional unique constraint on `(raw_source_item, source_fingerprint)` for nonempty fingerprints.
+Legacy/manual candidates keep empty fingerprints. New identities use normalized title, UTC start,
+and explicit venue (or address when venue is absent), never array position. Original identities
+are retained privately in `raw_metadata.candidate_identities`; moderator edits do not change identity.
+An omitted location later becoming explicit matches the original title/time when unambiguous.
+Distinct explicitly evidenced locations can remain distinct entries. Repeated mentions within a
+response are deduplicated. Existing cross-post duplicate checks still run during moderator approval,
+blocking duplicate public Events rather than discarding each post's provenance.
+
+Normal extraction skips existing candidates. To add genuinely new events from improved text/model
+results, use `--reextract`; existing fingerprint matches preserve identity and moderator edits.
+Matched unpublished rows can receive safe blank-location enrichment and untouched pricing normalization.
+Legacy candidates without recorded identities skip event replacement; safe null-price status repairs
+are still supported. Reconcile them manually before enabling multi-event re-extraction. Successful results
+are cached by normalized input, model and Kyiv calendar day. Re-extraction uses that cache unless
+input/model/day changes. Existing approved Events are never changed by extraction.
+
+Raw admin offers **View candidates (N)**; candidate admin shows the source post and links to all siblings.
+Each candidate is individually editable, approvable, rejectable and markable as duplicate.
+Dry-run prints readable per-event facts and detected/ready/unresolved/duplicate counts, with
+`Persisted: 0`. `--debug-json` opts into bounded validated diagnostic JSON (not raw provider responses).
+No raw status, metadata, candidates or Events are written during dry-run.
+
+Apply the local migration before using the updated extractor:
+
+```bash
+python manage.py migrate ingestion
+python manage.py extract_events --source festrepublic --limit 1 --dry-run
+python manage.py extract_events --source festrepublic --limit 1 --reextract --dry-run
+```
+
+For the existing collected item, configure these locally (do not commit credentials):
+
+```dotenv
+EVENT_EXTRACTION_PROVIDER=openai
+EVENT_EXTRACTION_MODEL=<your structured-output-capable model>
+OPENAI_API_KEY=<your API key>
+```
+
+Then perform one write-free test:
+
+```bash
+python manage.py extract_events --source festrepublic --limit 1 --dry-run
+```
+
+Manual commands:
+
+```bash
+python manage.py extract_events --dry-run --limit 10
+python manage.py extract_events --id 123 --dry-run
+python manage.py extract_events --source festrepublic --limit 20
+python manage.py extract_events --retry-failed --limit 20
+```
+
+Default selection is `extraction_status=new`; `--retry-failed` adds failed items. `--id` narrows to one
+existing item but respects status eligibility and candidate protection; it does not force-refresh
+extracted/ignored records. `--source` is an exact case-insensitive source username (optional @) and can
+be combined with ID/limit. Limit defaults to 20 and must be 1–100. Dry-run prints structured normalized
+facts and a summary, without saving candidates or changing raw status. Its output is for private developer
+review; it never dumps captions, source image URLs or provider responses. Failed batches exit nonzero
+after continuing the remaining items. Dry-run candidate counts are shown separately from saved counts.
+
+- **extracted:** one validated private candidate was saved with status `new`; raw status/link changes
+  occur in one transaction. Source image URL is internal only; no public photo is created/downloaded.
+- **ignored:** deterministic/provider decision is not an upcoming event; no candidate is created.
+- **failed:** validation, parsing or provider failed. Raw source data remains intact; no partial candidate
+  is saved. Concise sanitized reasons go to logs keyed by raw ID; there is no dedicated error model field.
+- **skipped:** existing candidates are preserved completely, regardless of review status. Retrying does
+  not overwrite moderator edits or create extra candidates. Previously extracted/ignored items are also
+  skipped unless an operator deliberately resets their raw status after review and no candidate exists.
+
+Concurrent extraction rechecks raw status and candidate existence under a row lock before writing;
+parallel runs create only one candidate. Provider work happens outside the database transaction, so
+concurrent runs may compute twice, but never save duplicate candidates. Existing historical/manual
+multiple candidates for a raw post are left intact; extraction skips rather than deleting them.
+
+RawSourceItem admin includes a candidate link and **Run extraction (new/failed items)** action, available
+to staff with raw-change and candidate-add permissions. EventCandidate lists include source URL alongside
+facts/confidence/status. Every candidate still requires human review and explicit approval; extraction
+never touches public Events, pushes notifications, geocodes or changes Android/API routes. Private OCR may download source images to memory only.
+
+Limitations: deterministic event detection is conservative and keyword-based, so it can miss unclear
+posts or create incomplete low-confidence candidates requiring review. The deterministic fallback remains single-event; the optional LLM array supports multi-event posts; ticket tiers, complex date wording and OCR noise still need
+review even with optional semantic extraction. Approval requires a manually supplied authorized photo or explicit source-image authorization,
+valid coordinates and required facts. Raw captions/metadata/images remain private.
+
+Verification commands:
+
+```bash
+python manage.py check
+python manage.py test ingestion.test_extraction --noinput
+python manage.py test ingestion --noinput
+python manage.py test --noinput
+```
+
+
+## Alternative Instagram provider: persistent Chromium with manual login
+
+Instaloader remains available and is the explicit default (`INSTAGRAM_COLLECTION_PROVIDER=instaloader`).
+Select `INSTAGRAM_COLLECTION_PROVIDER=playwright` to use the separate browser adapter. Invalid provider
+names fail clearly; errors never silently switch providers. Both adapters share `InstagramCollector`,
+the configured source whitelist, limits, raw persistence/dedup, dry-run and last-checked behavior.
+Collection still creates private raw records only; extraction and approval are separate commands/actions.
+
+Exact local setup (from the backend with its virtual environment activated):
+
+```bash
+pip install -r requirements.txt
+python -m playwright install chromium
+
+export INSTAGRAM_PLAYWRIGHT_PROFILE_DIR="$HOME/.local/share/rytm-instagram-profile"
+export INSTAGRAM_COLLECTION_PROVIDER=playwright
+export INSTAGRAM_PLAYWRIGHT_HEADLESS=false
+
+python manage.py instagram_browser_login
+```
+
+Playwright **1.63.0** is pinned, along with its `pyee` and `greenlet` dependencies. Install only Chromium;
+Firefox/WebKit are unnecessary. Playwright's Chromium installation may include its matching headless
+component/FFmpeg. See [Playwright browser installation](https://playwright.dev/python/docs/browsers) and
+[persistent context documentation](https://playwright.dev/python/docs/api/class-browsertype#browser-type-launch-persistent-context).
+A headed browser needs a working desktop display and Chromium's operating-system libraries.
+
+The login command always opens Chromium visibly using `launch_persistent_context`. Log into Instagram
+in that browser yourself and manually complete any checkpoint, CAPTCHA, 2FA or confirmation requested.
+When the home page is usable, return to the terminal and press Enter. The command checks for an Instagram
+session cookie plus authenticated navigation or a usable home feed, rejects login/checkpoint/challenge
+pages, and closes Chromium cleanly. It never asks for a terminal username/password, types credentials,
+solves verification or exports cookies. A failed check reports:
+
+```text
+Instagram browser session is not authenticated. Run: python manage.py instagram_browser_login
+```
+
+The default profile is `~/.local/share/rytm-instagram-profile`, separate from your daily browser.
+`INSTAGRAM_PLAYWRIGHT_PROFILE_DIR` can override it with an absolute dedicated directory outside the
+Rytm workspace and any Git checkout; relative/repository paths, the home directory itself and `/` are
+rejected (including resolved symlinks into a repository). New profile directories use private permissions.
+The dedicated-profile basenames are gitignored as an additional guard. Never commit/copy the profile
+into a repository: it contains private browser state. Cookie values, session data, full HTML and responses
+are never printed or added to raw metadata. Do not open login and collection simultaneously with the
+same profile; Chromium locks it. Close the other instance first if launch reports a profile error.
+
+After manual login succeeds and the browser closes, run one low-volume dry-run:
+
+```bash
+INSTAGRAM_COLLECTION_PROVIDER=playwright \
+python manage.py collect_instagram --username festrepublic --limit 3 --dry-run
+```
+
+For persistence (still private raw items only):
+
+```bash
+INSTAGRAM_COLLECTION_PROVIDER=playwright \
+python manage.py collect_instagram --username festrepublic --limit 3
+```
+
+Profile/headless/provider variables may instead be placed in the backend's ignored `.env`. The browser
+adapter does not use `INSTAGRAM_USERNAME`, `INSTAGRAM_PASSWORD` or `INSTAGRAM_SESSION_FILE`; those belong
+to Instaloader. Collection is headed by default. Set `INSTAGRAM_PLAYWRIGHT_HEADLESS=true` only after
+verifying the same profile locally; headless behavior is not assumed equivalent. Manual login remains
+headed regardless of this setting. No stealth flags, fingerprint spoofing, proxies, CAPTCHA bypass or
+anti-bot evasion are implemented; Instagram may still block browser automation and must be handled manually.
+
+The browser opens only configured profile URLs and bounded `/p/`, `/reel/` or legacy `/tv/` links.
+It accepts root-level and username-prefixed routes, deduplicates shortcodes, and permits at most two
+small scrolls when the initial grid has no collectible links; it never crawls history to fill the limit. Each navigation has a
+bounded timeout and a one-second pause; the existing command retains its two-second inter-account delay.
+There are no retries, liking/following/commenting, posting, messaging or other account interactions.
+Image/media/font fetches and file downloads are blocked during collection; manual login renders normally.
+Image URLs can still be read from metadata and remain private references, with no image upload/copy.
+
+Post parsing is isolated in `instagram_html.py`: use semantic caption headings plus schema.org JSON-LD and Open Graph metadata. Publication times
+prefer structured metadata, then a DOM time associated with the matching post permalink or a single
+unambiguous timestamp; multiple comment times are not treated as the original publication time. Captions may fall back to Instagram's metadata summary,
+which can include its likes/author wrapper; the origin is recorded for review. Canonical URLs must match
+the requested shortcode. Only small normalized debug fields are stored, never page HTML or cookie state.
+Naive/malformed/missing publication timestamps remain null; posts with known timestamps older than 14 days
+are skipped. Unknown timestamps are retained from the bounded visible window for manual review.
+
+One removed/malformed post logs its shortcode safely and is skipped while other links continue. If every
+bounded post is unreadable, the source fails clearly. Missing profile links fail clearly (empty/private
+profile, changed DOM or blocked page); profile visibility is not inferred from a username alone.
+Authentication expiry, checkpoint or rate block halts further browser requests for that run and reports
+manual-login instructions. Raw/API/candidate/publication rules are unchanged, with no automatic fallback.
+
+Offline tests mock browser/Playwright adapters and cover provider selection, persistent launch, profile
+path guards, login checks, structured mapping, per-post failure isolation, command dedup, dry-run and
+source disabling. Run:
+
+```bash
+python manage.py check
+python manage.py test ingestion.test_instagram_playwright --noinput
+python manage.py test --noinput
+```
+
+Do not verify this by automatically collecting live accounts without a user-authenticated profile.
+A local headed launch on `about:blank` can verify Chromium/profile setup without accessing Instagram.
+DOM/session detection remains heuristic; no live Instagram compatibility is guaranteed until the user
+completes manual setup and the single-source dry-run succeeds.
+
+
+### Playwright profile DOM diagnostics
+
+Modern Instagram profile grids can use links such as `/festrepublic/reel/<shortcode>/` and
+`/festrepublic/p/<shortcode>/`. The collector normalizes these and root-level equivalents to stable
+shortcode IDs and canonical `/p/`, `/reel/` or legacy `/tv/` URLs. Prefixed links naming a different
+account are excluded; non-Instagram hosts, unrelated routes and duplicate shortcodes are ignored.
+
+Discovery uses semantic hrefs in main/article/role-main content, with whole-document semantic links as
+a fallback. It allows a bounded settling wait, then at most two 650-pixel scrolls with short waits if
+no content links are present. It does not use CSS class names, localized labels for core discovery,
+infinite scrolling or provider switching.
+
+Only clearly identified cookie/notification dialogs with normal optional-cookie decline or “Not now”
+buttons can be dismissed. Verification/security dialogs, login/checkpoint URLs and CAPTCHA are not
+handled automatically. Empty discovery reports “profile loaded but no post/reel links found”; private
+or unavailable status is reported only when the page explicitly indicates it. DOM parsing failures and
+unauthenticated sessions have separate errors.
+
+Enable sanitized diagnostics for a single configured source:
+
+```bash
+INSTAGRAM_COLLECTION_PROVIDER=playwright \
+python manage.py collect_instagram --username festrepublic --limit 3 --dry-run --debug-browser
+```
+
+`--debug-browser` requires the explicitly selected Playwright provider. It prints profile/final URLs
+with query/verification details removed, a bounded page title, header/login indicators, total anchor
+and post/reel/tv link counts. Per-post diagnostics contain only shortcode/kind and availability flags;
+the summary distinguishes successfully normalized posts from those retained by the 14-day recent window.
+There are no HTML snapshots, screenshots, cookies, token values, captions or image URLs in debug output.
+Dry-run still saves no RawSourceItem, candidate, Event or last-checked timestamp.
+
+DOM regression tests use HTML fixtures/browser mocks for posts, reels, mixed/prefixed/relative links,
+duplicates, empty profiles, one delayed-grid scroll, bounded empty discovery and safe overlay dismissal.
+
+### Private poster OCR
+
+Playwright's synchronous runtime owns a running asyncio loop. Each bounded account
+fetch now stops the browser/runtime before returning normalized items, so all ORM
+queries and the existing per-source transaction run in a normal synchronous thread.
+No `DJANGO_ALLOW_ASYNC_UNSAFE` setting is used.
+
+`collect_instagram` stores caption and private image URLs only. `extract_events`
+processes up to three image URLs already present in structured post metadata (no
+carousel navigation). The primary image is always first. OCR text is stored in
+`RawSourceItem.raw_metadata.image_text`, separately from `raw_text`, with engine,
+status, safe error codes and a URL/configuration fingerprint. Successful, empty,
+partial and failed image attempts are cached; installing a missing engine enables
+another attempt. To retry an expired CDN URL or OCR failure, clear `image_text_cache`
+in private metadata before retrying extraction. Existing candidates remain untouched.
+Dry-run can download/OCR in memory but saves no metadata, status or candidates.
+
+The local provider requires Tesseract and English/Ukrainian language data, e.g.
+`sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-ukr`.
+No Python dependencies or model migrations were added for OCR (Pillow and requests
+already exist). Configure `EVENT_OCR_EXECUTABLE` for a locally unpacked binary,
+`TESSDATA_PREFIX` for its language directory, and optionally `EVENT_OCR_LANGUAGES`
+(default `ukr+eng`). `EVENT_IMAGE_TEXT_PROVIDER=disabled` disables image processing.
+Missing engine/languages are explicitly reported in private metadata/dry-run output;
+caption extraction remains usable. No paid OCR/vision provider is enabled.
+
+Downloads accept HTTPS Instagram CDN subdomains (`cdninstagram.com`, `fbcdn.net`),
+reject redirects, require JPEG/PNG/WebP MIME, and cap each response at 5 MiB with
+5/10-second connect/read timeouts and a 20-second stream deadline. Decoded images
+are capped at 16 million pixels. Tesseract has a 20-second timeout. Original and
+converted bytes use memory and stdin, and are discarded; no media upload/storage
+or Event.photo assignment occurs. One bad image cannot discard the caption or
+other bounded images. Text is capped at 24,000 characters across three images.
+
+The parser uses caption and poster evidence to build factual summaries, never
+copies OCR into descriptions. Conflicting dates/prices and labeled facts remain
+unresolved with lower confidence and review notes. Uppercase poster headings and
+explicit source-name lines are tentative title/venue hints, capped at 0.7 confidence
+and flagged for review; no address is inferred from the account. Both caption and
+OCR are visible only in private admin reference fields. Public approval still
+requires moderator review and a manual public photo or explicit authorization to copy the primary
+source image during approval. OCR itself never writes public media.
+
+### Location assistance and price states
+
+#### Location facts in multi-event extraction
+
+Caption/OCR location hints now accompany deterministic observations in the semantic input.
+The strict multi-event contract permits `shared_context` with venue/address and quoted evidence;
+older cached envelopes remain readable. Calendar/program wording such as “Події жовтня у …” or
+“підбіркою майбутніх подій … на …” can establish a shared venue. Account identity, a sponsor/footer
+mention, or an unscoped OCR logo cannot establish that venue. Competing program locations prevent
+global inheritance, and event-specific venues override shared context and its associated address.
+
+Location validation tolerates case, spacing, punctuation, `!` prefixes, common street/name abbreviations,
+conservative Ukrainian case endings, and small anchored OCR errors. It still requires matching quotes
+in caption/OCR and rejects borrowed event evidence and unsupported invented names. Explicitly named
+streets can be extracted without a house number; no address or number is inferred from a venue.
+Private `location_provenance` distinguishes event-specific, shared-post, and uncertain OCR evidence;
+source-account context is explicitly recorded as an unused hint. The original provider batch is retained
+alongside grounded output for future diagnosis. No extraction metadata is added to the public API.
+
+Re-extraction now fills validated location blanks on uniquely matched unpublished candidates while
+preserving their fingerprints, moderator facts, dates, status, and coordinates. Untouched pricing can
+be normalized from validated extraction output as described below. Admin changes
+to venue/address are tracked privately; historical change logs also protect deliberately cleared fields.
+An invalid date/price retains independently grounded location evidence in the private review record,
+but cannot create a new candidate. Unique existing source entries can receive location-only enrichment
+even when the new suggested date is unresolved. Ambiguous identity matches remain untouched.
+
+The default extraction command prepares location facts without external geocoding. To explicitly invoke
+the same resolver after saving enrichment/new candidates, add `--resolve-locations`:
+
+```bash
+python manage.py extract_events --source festrepublic --limit 1 --reextract --dry-run
+python manage.py extract_events --source festrepublic --limit 1 --reextract --resolve-locations
+python manage.py resolve_candidate_locations --source festrepublic --dry-run
+```
+
+`--resolve-locations --dry-run` reports prospective resolution without storing candidates or lookup cache.
+A subsequent standalone resolver preview reads actual saved rows; it cannot see enrichment from an earlier
+dry run. The supported manual workflow is preview extraction, explicitly persist reviewed enrichment,
+then preview/run location resolution. Manual coordinates continue to win. No migration or Android change
+is required. The full backend suite passes 244 tests; four JavaScript price-toggle tests also pass.
+See [the complete live verification report](ingestion/LOCATION_EXTRACTION_VERIFICATION.md) for all
+17 festrepublic events, proposed enrichment, resolver results, and unchanged-database checks.
+
+#### Enrich existing candidate locations
+
+Re-extraction preserves candidate identity and moderator edits; it is not a location backfill.
+Use the dedicated management command for existing unpublished candidates awaiting review:
+
+```bash
+python manage.py resolve_candidate_locations --source festrepublic --dry-run
+python manage.py resolve_candidate_locations --id 8 --dry-run
+python manage.py resolve_candidate_locations --source festrepublic --limit 20
+python manage.py resolve_candidate_locations --id 8 --force
+```
+
+`--source` accepts a username with an optional `@`; `--id` selects a candidate, and the two filters
+can be combined. Without `--limit`, all matching candidates are inspected in primary-key order.
+Published/rejected/duplicate candidates are excluded. A nonexistent or ineligible explicit ID is an
+error. Complete coordinate pairs are preserved by default, as are recorded manual partial coordinates.
+Nonmanual incomplete pairs can be completed. `--force` explicitly allows replacing existing coordinates,
+including manual ones, but only after a successful bounded resolution; failure preserves the old pair.
+Empty, untouched addresses can now be enriched even when the coordinate pair already exists.
+Address-only enrichment preserves that pair and requires the new result to agree within 75 metres.
+Existing addresses and deliberately cleared moderator addresses remain protected, including with
+`--force`. Identity, review state, and public Events remain unchanged.
+
+Canonical addresses use structured Nominatim `road` and optional `house_number`, never the long
+`display_name`. Common Ukrainian street types become `вул.`, `просп.`, `пл.`, and `пров.`;
+proper names and valid house-number ranges are preserved. Missing numbers are never invented.
+Strict venue reuse can also copy concise addresses from approved Events or candidates with trusted
+geocoded/known-venue address provenance. Arbitrary pending addresses are not reused.
+Legacy successful cache entries are refreshed once for structured address details; dry runs keep
+those upgrades in memory. Private address provenance appears in admin, while address stays editable.
+
+The command shares the admin resolver: strict known-venue reuse, address, venue/address, venue, then
+limited abbreviation expansion. It prints each outcome and a summary of processed, resolved, already
+located, no-evidence, ambiguous, and failed candidates, plus coordinates enriched, addresses enriched,
+already complete, and skipped. Diagnostics show existing/proposed address and its private source.
+Saved coordinates and private provenance use
+the existing fields, so reopening the admin immediately centers the map and displays its marker.
+
+`--dry-run` performs real resolution but saves nothing, including no lookup-cache records or timestamps.
+It reads existing cached results and keeps new results only in memory for this invocation. Application-wide
+provider locking and a cooldown still space external requests. A preview never changes candidate notes,
+coordinates, or update timestamps. Start with a source/ID and a dry run, then explicitly run without
+`--dry-run` only when you want to persist the results. This is a manual backfill, not scheduled collection.
+No additional migration is required.
+
+EventCandidate admin supports **Resolve location from venue/address (missing coordinates only)** from the list's
+Action menu. Save address/venue edits first, select the candidate, choose the action, and run it.
+This explicit action was chosen instead of recurring automatic ingestion calls to public Nominatim.
+Opening a form never contacts the geocoder. `ingestion/geocoding.py` provides the small provider
+interface and Nominatim implementation. First it checks reliable locations for an exact normalized
+venue name in approved Events or previously geocoded candidates. A usable supplied address must
+also match; conflicting locations more than 75 metres apart prevent reuse. A later manual edit
+invalidates a candidate's old geocoding provenance for reuse. There is no fuzzy venue matching.
+Otherwise searches proceed through explicit address, venue plus address, and venue only, stopping
+at the first acceptable result. A final search-only expansion of `Драмтеатр`/`ім.` can improve venue
+matches. Missing/unusable address fragments skip address stages. Whitespace and common Ukrainian
+abbreviation spacing are normalized in search queries. Existing addresses are preserved; empty,
+untouched addresses may receive reliable structured geocoder data through the enrichment command.
+Every query includes Lviv/Ukraine; at most four distinct queries are attempted.
+
+Public Nominatim's [usage policy](https://operations.osmfoundation.org/policies/nominatim/) limits
+application-wide traffic to one request per second, requires identifying User-Agent/attribution,
+requires caching, and discourages recurring bulk lookups. This workflow is for low-volume moderator
+use only, with no autocomplete, scheduled geocoding, bulk prefetch, or automatic retry. PostgreSQL
+advisory locking serializes requests across workers; a persistent timestamp enforces at least 1.1
+seconds between requests. The resolver waits at most 1.1 seconds between distinct staged searches;
+a busy worker returns a manual-review message. Ambiguity, provider failure, and rate limits stop
+fallback; only no-match or out-of-bounds results allow another stage.
+Successful queries are cached persistently; failures/ambiguities/no matches are cached for 24 hours.
+Connect/read timeouts are 3/7 seconds, response size is limited to 64 KiB, redirects are rejected,
+and streaming checks a 20-second deadline. Configure `GEOCODING_NOMINATIM_URL` to switch to another
+compatible HTTPS endpoint without a code change, and `GEOCODING_USER_AGENT` for the app identity.
+
+Only a unique finite result within longitude 23.90–24.15 and latitude 49.77–49.90 is saved. Ambiguous,
+unavailable, or unsupported results leave the map available for manual selection and append a private
+review note. Private `[Location lookup]` diagnostics record exact queries, cache hits, provider status,
+result counts, top display names/coordinates, and bounds decisions. They are not public API fields.
+Existing coordinates are preserved; to request another lookup after editing an address,
+clear both coordinates and save first. `[Location]` notes provide private provenance, displayed as
+**Location source**. Saving map/numeric edits records moderator selection. Coordinates remain the same
+normal model fields with the existing approval validation. Stored coordinates immediately center the
+Leaflet map and create its marker at zoom 16; missing coordinates start at Lviv zoom 13.
+
+Both EventCandidate and Event now store `price_status` separately from the existing nullable decimal:
+
+| Status | Price | Meaning |
+| --- | --- | --- |
+| paid | non-negative decimal | Explicit known amount; “від/from” remains a private minimum-price note |
+| free | 0.00 | Explicit free admission |
+| unknown | null | Missing, ambiguous, or unreadable price information |
+
+The existing extraction schema remains compatible: validated positive decimals map to paid, explicit
+zero to free, and missing/conflicting evidence to unknown when creating candidates. Moderator forms
+allow all three states; free normalizes to `Decimal('0.00')` and unknown clears the amount on save.
+Lightweight admin JavaScript immediately hides and disables the numeric row for Free/Unknown and
+shows/requires it for Paid. The backend ignores stale hidden amounts, including invalid input.
+Explicit Paid requires a finite non-negative decimal at form/API/approval validation; missing amounts
+produce a clear required-price error. Explicit Paid zero remains Paid; extracted zero still means Free.
+Unknown is publishable without inventing a price.
+The public serializer adds `price_status` while keeping `price` and all existing fields. API clients
+that omit status are classified from their supplied amount; PATCH of other facts preserves the state.
+
+Migration `events/0003` preserves historical public null-as-free events as explicit zero/free; existing
+positive amounts become paid. `ingestion/0004` classifies existing candidate amounts (missing stays
+unknown) and adds the private `LocationLookup` cache. Apply both with `python manage.py migrate`.
+Android needed the minimal compatibility adjustment because its previous null-as-free display was
+incorrect for new unknown events: DTO/domain status, mapper, feed/detail label, and submission price
+semantics now distinguish unknown/free/paid. Missing prices display “Ціну не вказано”; submissions use
+zero for free and blank for unknown. Existing numeric price formatting and fields are retained.
+
+Verification: 210 backend tests and four JavaScript toggle tests pass (`python manage.py test --noinput`
+and `node ingestion/js_tests/candidate.test.cjs`). Coverage includes staged searches, exact venue reuse,
+manual override, no external calls on admin render, normalization and stale values, provider caching,
+throttling/failure/ambiguity/bounds, price API/approval, and legacy migration. No new migration or Android
+change is needed for this refinement.
+
+Live investigation and retry on 2026-10-07 used unapproved candidate #8:
+
+- Original venue: `Драмтеатр ім. Марії Заньковецької`; address: empty string; coordinates: empty.
+- Previously failed query: `Драмтеатр ім. Марії Заньковецької, Львів, Україна`.
+  The old `not_found` cache implies HTTP 200 with zero rows from the original provider code;
+  historical HTTP metadata was not stored. The retry reused that cache without an external call.
+  No returned result was rejected by bounds. Formatting normalization did not change this query;
+  the brittle single abbreviated venue search had no fallback.
+- Second query: `театр імені Марії Заньковецької, Львів, Україна`.
+  One fresh Nominatim request returned HTTP 200 and one result inside bounds:
+  `Драматичний театр ім. Марії Заньковецької, 1, вулиця Лесі Українки, Середмістя, Галицький район,
+  Львів, Львівська міська громада, Львівський район, Львівська область, 79008, Україна`.
+- Saved latitude `49.8439958`, longitude `24.0275425`, provenance `geocoded: from candidate venue
+  search context; address still requires review.` The address remains empty.
+- Reopening the admin automatically displayed the centered marker. Unknown/Free hid the price row;
+  Paid immediately displayed an enabled required input. Candidate #8 remains new/unlinked to an
+  Event; no approval/publication was performed. The user's original unsaved form was left untouched;
+  verification used a separate temporary browser tab.
+
+#### Unknown pricing and re-extraction
+
+Missing, unreadable, ambiguous, or unsupported extracted pricing is explicitly `price_status=unknown`
+with `price=None`. Explicit free entry is `free` with zero; a reliable numeric amount is `paid`, and
+“від” prices retain the existing minimum-price extraction note. The public serializer returns null
+for unknown price.
+
+`extract_events --reextract` normalizes pricing on matched unpublished candidates when it has not
+been manually edited. Moderator changes to either price field protect both values, including an
+explicit Unknown selection. Historical Django admin change logs and private edit markers are checked.
+Legacy candidates without extraction fingerprints can safely repair a null price with an inconsistent
+status without replacing their identity. Dry runs preview these repairs without saving. The explicit
+`--force-prices` option allows replacement of moderator pricing on matched re-extracted entries.
+No new migration is needed; pricing already has explicit statuses.
+
+#### Additional event categories
+
+The existing five category values remain supported. New values and Ukrainian labels are:
+
+- `education`: Навчання / Майстер-класи
+- `performance`: Вистави / Кіно
+- `concert`: Концерти
+
+EventCandidate shares Event's choices; serializers and admin inherit the expanded choices.
+Extraction schemas derive allowed values from those choices. Deterministic parsing and quoted
+LLM evidence use shared format cues. Concerts no longer default to party, and bare “live” does not
+imply a concert. Mixed formats use the advertised heading or an explicit primary format; an
+ancillary afterparty does not override a concert. Unknown/unsupported categories remain null.
+
+GET `/api/events/` and `?category=education`, `?category=performance`, `?category=concert`, plus
+organizer POST submissions, are covered by API tests. Choice-only migrations were generated for
+Event and EventCandidate; no records are reclassified by a data migration.
+
+See `CATEGORY_VERIFICATION.md` for verification results and changed files.
+
+#### Public discovery, source observations, and search
+
+Telegram public-channel pages use the same `SourceAccount` → `RawSourceItem` → extraction →
+`EventCandidate` → moderator approval pipeline as Instagram. No Telegram login or private-group
+access is used. Telegram poster downloads reuse the bounded private OCR downloader, limited to
+observed Telegram CDN origins; publication still requires the existing explicit moderator consent.
+
+```bash
+python manage.py migrate
+python manage.py seed_telegram_sources
+python manage.py collect_telegram --username kudypity_lviv --limit 5 --dry-run
+python manage.py collect_telegram --username lvivgo_afisha --limit 5 --dry-run
+python manage.py collect_sources --platform telegram --limit 5 --dry-run
+python manage.py collect_instagram --limit 3 --dry-run
+python manage.py extract_events --platform telegram --limit 50 --dry-run
+```
+
+Without a username, collectors use all enabled sources of the selected platform. Instagram remains
+compatible with its previous command and providers. Each source fails independently; summaries report
+source successes, no-new-post cases, failures, and raw-item totals. `collect_sources` dispatches both
+platforms and still attempts the other platform if one fails. No discovery runs are scheduled.
+Explicit Telegram dry runs may preview an unseeded public username without creating a source row;
+an existing disabled source stays disabled and cannot be previewed through this fallback.
+
+Private `EventSourceObservation` records preserve per-event facts from every source. Normalized title,
+UTC start time, and venue/address fingerprints contain no platform value. Exact or strong fuzzy title
+matches at the same start time with reliable venue/address/nearby-point agreement reuse one canonical
+candidate/public Event. Time disagreements up to 30 minutes, or multiple competing matches, create
+probable-duplicate candidates for review. Venue/date alone is insufficient. Generic concert titles do
+not establish a reliable fingerprint. Approval retains its cross-source duplicate guard and serialization
+lock. Safe location blanks and untouched unknown prices can gain stronger supported evidence; manual
+edits remain protected. Admin offers linked observations, proposed facts, matching record links, and
+unique/probable/confirmed duplicate states. Nothing is published by collection/extraction.
+
+Public GET `/api/events/` accepts combinable `q`, existing `category`/`bbox`, `date_from`, `date_to`, and
+`price_status` (`free`, `paid`, `unknown`). Text search covers only public title/description/address;
+ingested venue names are searchable through the generated public description. Date boundaries are
+inclusive Kyiv calendar days for event start, and existing approved/upcoming visibility rules remain.
+Malformed dates, reversed ranges, and unsupported price statuses return 400. Null price is not free.
+A composite `(status, start_time)` index supports public visibility/date queries; text search uses
+PostgreSQL case-insensitive matching at the current MVP scale.
+
+See `DISCOVERY_SEARCH_VERIFICATION.md` for test results, live previews, pending migrations, and changed files.
+
+
+## Account/profile stage
+
+See [account and Google setup](../ACCOUNT_PROFILE_SETUP.md) and
+[implementation verification](../ACCOUNT_PROFILE_VERIFICATION.md) for migration,
+configuration, auth/profile endpoints, build and manual verification steps.

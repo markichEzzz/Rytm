@@ -25,3 +25,49 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Private Instagram sessions (local only)
+.instagram/
+instagram-session*
+
+# Dedicated private browser profiles (runtime also rejects paths inside Git repos)
+rytm-instagram-profile/
+.instagram-playwright/
+playwright-profile/
+
+# Historical environment and credential copies
+venv_old/
+*.pem
+*.key
+
+# Safe deployment template only; real environment files stay ignored
+!.env.example
+
+# Local tools, credentials, exports and generated test/build output
+.local-tools/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest-results/
+test-results/
+build/
+dist/
+*.egg-info/
+*.sql
+*.dump
+*.backup
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
+google-services.json
+*service-account*.json
+*service_account*.json
+*credentials*.json
+storage-state*.json

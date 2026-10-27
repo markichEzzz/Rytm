@@ -1,0 +1,7 @@
+#candidate-location-map {height: 360px; max-width: 850px; width: 100%; border: 1px solid var(--border-color); border-radius: 6px; color: #222; z-index: 0;}
+.form-row.field-price[hidden] {display: none !important;}
+.candidate-map-marker span {display: block; width: 20px; height: 20px; border: 3px solid white; border-radius: 50%; background: #167caf; box-shadow: 0 1px 5px #333;}
+.source-image-preview {max-width: 650px;}
+.candidate-source-image {max-width: 100%; max-height: 420px; object-fit: contain; border-radius: 5px;}
+.source-image-error {padding: 12px; color: var(--body-fg); background: var(--darkened-bg);}
+.source-image-preview [hidden] {display: none;}

@@ -74,7 +74,7 @@ class AccountTests(APITestCase):
         self.register(); user = get_user_model().objects.get(email='user@example.com')
         result = self.client.get(f'/api/users/{user.pk}/profile/')
         self.assertEqual(result.status_code, 200)
-        self.assertEqual(set(result.data), {'id', 'display_name', 'avatar_url', 'bio', 'reputation', 'stats', 'verified_organizer'})
+        self.assertEqual(set(result.data), {'id', 'display_name', 'avatar_url', 'bio', 'city', 'reputation', 'stats', 'verified_organizer'})
         self.assertNotIn('user@example.com', str(result.data))
     def test_public_another_user_and_missing_user(self):
         self.auth(self.register().data)

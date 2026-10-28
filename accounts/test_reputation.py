@@ -132,7 +132,7 @@ class ReputationTests(APITestCase):
     def test_public_profile_privacy(self):
         self.report(status='confirmed')
         data=self.client.get(f'/api/users/{self.owner.pk}/profile/').data
-        self.assertEqual(set(data),{'id','display_name','avatar_url','bio','reputation','stats','verified_organizer'})
+        self.assertEqual(set(data),{'id','display_name','avatar_url','bio','city','reputation','stats','verified_organizer'})
         self.assertEqual(set(data['stats']),{'approved_events','confirmed_complaints'})
         self.assertEqual(data['reputation']['score'],42)
         self.assertNotIn('PRIVATE',str(data));self.assertNotIn('reporter',str(data))

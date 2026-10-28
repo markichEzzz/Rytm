@@ -44,7 +44,7 @@ class EventSerializer(serializers.ModelSerializer):
             cache[event.submitted_by_id] = reputation_summary(event.submitted_by_id)
             cache[event.submitted_by_id]['verified_organizer'] = is_verified(event.submitted_by_id)
         reputation = cache[event.submitted_by_id]['reputation']
-        return {'id': event.submitted_by_id, 'display_name': profile.display_name, 'avatar_url': profile.avatar_url,
+        return {'id': event.submitted_by_id, 'display_name': profile.display_name, 'avatar_url': profile.public_avatar_url,
                 'reputation_score': reputation['score'], 'reputation_label': reputation['label'],
                 'verified_organizer': cache[event.submitted_by_id]['verified_organizer']}
 

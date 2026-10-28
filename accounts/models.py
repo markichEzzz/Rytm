@@ -1,16 +1,23 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 class UserProfile(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='profile')
     display_name = models.CharField(max_length=100, blank=True)
     avatar_url = models.URLField(max_length=2048, blank=True)
     bio = models.CharField(max_length=1000, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    avatar = models.ImageField(upload_to='profile_avatars/', blank=True)
     # Private normalized reservation: built-in User.email is not unique. Legacy
     # duplicate/blank emails can retain their accounts without unsafe merging.
     email_key = models.EmailField(max_length=254, unique=True, null=True, blank=True, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def public_avatar_url(self):
+        return self.avatar.url if self.avatar else self.avatar_url
 
 class UserIdentity(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='identities')
@@ -27,4 +34,6 @@ class UserIdentity(models.Model):
 class DeletedAccountMedia(models.Model):
     """Durable storage cleanup outbox; no account identifiers or file contents."""
     name = models.CharField(max_length=1024, unique=True)
+    # Upload intents wait before cleanup so an in-flight avatar cannot be deleted.
+    available_at = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)

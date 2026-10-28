@@ -6,6 +6,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.contrib.sessions.models import Session
 from django.core.files.storage import default_storage
 from django.db import transaction
+from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 from events.models import Event, EventReport, Organizer
 from ingestion.models import EventCandidate
@@ -15,11 +16,12 @@ from .models import DeletedAccountMedia, UserProfile, UserIdentity
 
 def purge_deleted_media():
     """Retryable; only our storage keys, never arbitrary URLs. Failures stay queued."""
-    for pending in DeletedAccountMedia.objects.order_by('pk').iterator():
+    for pending in DeletedAccountMedia.objects.filter(available_at__lte=timezone.now()).order_by('pk').iterator():
         # A shared public image must not disappear with its former submitter.
         if (Event.objects.filter(photo=pending.name).exists() or
                 EventCandidate.objects.filter(public_photo=pending.name).exists() or
-                TourRoute.objects.filter(cover_image=pending.name).exists()):
+                TourRoute.objects.filter(cover_image=pending.name).exists() or
+                UserProfile.objects.filter(avatar=pending.name).exists()):
             pending.delete()
             continue
         try:
@@ -39,7 +41,8 @@ def delete_account(user):
     private_events = Event.objects.filter(submitted_by=user).exclude(status='approved')
     routes = TourRoute.objects.filter(submitted_by=user)
     private_routes = routes.filter(is_published=False)
-    images = set(candidates.exclude(public_photo='').values_list('public_photo', flat=True))
+    images = set(UserProfile.objects.filter(user=user).exclude(avatar='').values_list('avatar', flat=True))
+    images.update(candidates.exclude(public_photo='').values_list('public_photo', flat=True))
     images.update(private_events.exclude(photo='').values_list('photo', flat=True))
     images.update(private_routes.exclude(cover_image='').values_list('cover_image', flat=True))
     for name in images:

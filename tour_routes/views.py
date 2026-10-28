@@ -2,12 +2,12 @@ from django.core.exceptions import ValidationError as ModelValidationError
 from django.db.models import Q
 from django.http import Http404
 from rest_framework import serializers
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import TourRoute, RouteType, Difficulty
 from .distance import attach_distances
-from .serializers import RouteSerializer, RouteDetailSerializer
+from .serializers import RouteSerializer, RouteDetailSerializer, RouteSubmissionSerializer
 
 class RouteFilters(serializers.Serializer):
     q = serializers.CharField(required=False, allow_blank=True, max_length=200)
@@ -60,3 +60,13 @@ class RouteDetailView(APIView):
         routes=public_routes(pk=pk)
         if not routes: raise Http404
         return Response(RouteDetailSerializer(routes[0], context={'request':request}).data)
+
+
+class RouteSubmissionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = RouteSubmissionSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        route = serializer.save()
+        return Response({'id': route.pk, 'status': 'pending'}, status=201)

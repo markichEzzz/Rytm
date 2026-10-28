@@ -130,9 +130,33 @@ class AccountDeletionTests(APITestCase):
         with patch('django.contrib.auth.models.User.delete', side_effect=RuntimeError('database unavailable')):
             with self.assertRaises(RuntimeError):self.delete()
         self.assertTrue(get_user_model().objects.filter(pk=self.user.pk).exists());self.storage.assert_not_called()
+    def test_submitted_routes_erased_or_anonymized(self):
+        from tour_routes.models import TourRoute, TourRouteStop
+        draft = TourRoute.objects.create(title='Private walk', submitted_by=self.user, cover_image='route_covers/private.jpg')
+        public = TourRoute.objects.create(title='Public walk', description='Private author text', short_description='Private summary',
+            estimated_duration_minutes=30, submitted_by=self.user)
+        for order in [1, 2]:
+            TourRouteStop.objects.create(route=public, order=order, title=f'Stop {order}', description='Private stop text', latitude=49, longitude=24)
+        public.is_published = True
+        public.save()
+        other = TourRoute.objects.create(title='Other draft', submitted_by=self.other)
+        ct = ContentType.objects.get_for_model(TourRoute)
+        LogEntry.objects.create(user=self.other, content_type=ct, object_id=str(draft.pk), object_repr='Private walk', action_flag=2)
+        with self.captureOnCommitCallbacks(execute=True): self.delete()
+        self.assertFalse(TourRoute.objects.filter(pk=draft.pk).exists())
+        self.assertTrue(TourRoute.objects.filter(pk=other.pk, submitted_by=self.other).exists())
+        public.refresh_from_db()
+        self.assertTrue(public.is_published)
+        self.assertIsNone(public.submitted_by_id)
+        self.assertEqual(public.description, '')
+        self.assertEqual(public.short_description, '')
+        self.assertFalse(public.stops.exclude(description='').exists())
+        self.assertFalse(LogEntry.objects.filter(content_type=ct).exists())
+        self.storage.assert_called_once_with('route_covers/private.jpg')
+
     def test_current_user_relation_inventory(self):
         expected={'admin.logentry','accounts.userprofile','accounts.useridentity','events.organizer','events.event',
-                  'events.eventreport','events.usereventinteraction','ingestion.eventcandidate','token_blacklist.outstandingtoken'}
+                  'events.eventreport','events.usereventinteraction','ingestion.eventcandidate','token_blacklist.outstandingtoken','tour_routes.tourroute'}
         actual={relation.related_model._meta.label_lower for relation in get_user_model()._meta.related_objects}
         self.assertEqual(actual,expected,'New User relation requires an erasure policy.')
 

@@ -143,3 +143,94 @@ class TourRouteTests(APITestCase):
         response=self.client.post(f'/admin/tour_routes/tourroute/{route.pk}/change/',self.admin_payload(route,orders=(2,1)))
         self.assertEqual(response.status_code,302)
         self.assertEqual(route.stops.last().pk,first)
+
+
+class RouteSubmissionTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username='route-author', password='test-password')
+        self.other = get_user_model().objects.create_user(username='other-author')
+        self.payload = {
+            'title': 'Мій Львів', 'description': 'Міська прогулянка', 'route_type': 'culture',
+            'difficulty': 'easy', 'estimated_duration_minutes': 45,
+            'stops': [
+                {'order': 1, 'title': 'Початок', 'latitude': 49.84, 'longitude': 24.03},
+                {'order': 2, 'title': 'Фініш', 'description': 'Двір', 'address': 'Львів', 'latitude': 49.85, 'longitude': 24.04},
+            ],
+        }
+        self.client.force_authenticate(self.user)
+
+    def test_authenticated_submission_retains_creator_and_is_pending(self):
+        response = self.client.post('/api/routes/submit/', self.payload, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['status'], 'pending')
+        route = TourRoute.objects.get(pk=response.data['id'])
+        self.assertEqual(route.submitted_by, self.user)
+        self.assertFalse(route.is_published)
+        self.assertEqual(list(route.stops.values_list('order', flat=True)), [1, 2])
+        self.assertEqual(route.stops.last().address, 'Львів')
+        self.assertEqual(self.client.get('/api/routes/').data, [])
+        self.assertEqual(self.client.get(f'/api/routes/{route.pk}/').status_code, 404)
+
+    def test_unauthenticated_rejected(self):
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.post('/api/routes/submit/', self.payload, format='json').status_code, 401)
+        self.assertFalse(TourRoute.objects.exists())
+
+    def test_cannot_override_owner_or_publish_even_as_staff(self):
+        self.user.is_staff = True
+        self.user.save()
+        self.payload.update(submitted_by=self.other.pk, is_published=True, status='approved')
+        response = self.client.post('/api/routes/submit/', self.payload, format='json')
+        self.assertEqual(response.status_code, 201)
+        route = TourRoute.objects.get()
+        self.assertEqual(route.submitted_by, self.user)
+        self.assertFalse(route.is_published)
+        route.is_published = True
+        route.save()
+        self.assertEqual(self.client.get(f'/api/routes/{route.pk}/').status_code, 200)
+        self.assertIn('submitted_by', TourRouteAdmin.readonly_fields)
+
+    def test_minimum_and_maximum_stop_count(self):
+        for count in [0, 1, 101]:
+            with self.subTest(count=count):
+                self.payload['stops'] = [dict(order=i+1, title='Stop', latitude=49, longitude=24) for i in range(count)]
+                self.assertEqual(self.client.post('/api/routes/submit/', self.payload, format='json').status_code, 400)
+        self.assertFalse(TourRoute.objects.exists())
+
+    def test_order_must_be_contiguous_unique_and_in_payload_order(self):
+        for orders in [(1, 1), (0, 1), (1, 3), (2, 1), (-1, 2)]:
+            with self.subTest(orders=orders):
+                for stop, order in zip(self.payload['stops'], orders): stop['order'] = order
+                self.assertEqual(self.client.post('/api/routes/submit/', self.payload, format='json').status_code, 400)
+        self.assertFalse(TourRoute.objects.exists())
+
+    def test_coordinates_and_stop_title(self):
+        for field, value in [('latitude', 91), ('latitude', -91), ('longitude', 181), ('longitude', -181),
+                             ('latitude', 'NaN'), ('longitude', 'Infinity'), ('latitude', None), ('title', ' ')]:
+            with self.subTest(field=field, value=value):
+                payload = {**self.payload, 'stops': [dict(stop) for stop in self.payload['stops']]}
+                payload['stops'][0][field] = value
+                self.assertEqual(self.client.post('/api/routes/submit/', payload, format='json').status_code, 400)
+        self.assertFalse(TourRoute.objects.exists())
+
+    def test_metadata_validation(self):
+        for field, value in [('title', ''), ('title', 'x'*256), ('description', ' '), ('route_type', 'party'),
+                             ('difficulty', 'unknown'), ('estimated_duration_minutes', 0), ('estimated_duration_minutes', 1.5)]:
+            with self.subTest(field=field, value=value):
+                self.assertEqual(self.client.post('/api/routes/submit/', {**self.payload, field: value}, format='json').status_code, 400)
+        self.assertFalse(TourRoute.objects.exists())
+
+    def test_transaction_rolls_back_partial_route(self):
+        from unittest.mock import patch
+        with patch.object(TourRouteStop.objects, 'create', side_effect=RuntimeError('stop write failed')):
+            with self.assertRaises(RuntimeError):
+                self.client.post('/api/routes/submit/', self.payload, format='json')
+        self.assertFalse(TourRoute.objects.exists())
+
+    def test_other_users_cannot_modify_route_via_public_api(self):
+        response = self.client.post('/api/routes/submit/', self.payload, format='json')
+        pk = response.data['id']
+        self.client.force_authenticate(self.other)
+        self.assertEqual(self.client.patch(f'/api/routes/{pk}/', {'title': 'Changed'}, format='json').status_code, 405)
+        self.assertEqual(self.client.delete(f'/api/routes/{pk}/').status_code, 405)
+        self.assertEqual(TourRoute.objects.get(pk=pk).title, self.payload['title'])

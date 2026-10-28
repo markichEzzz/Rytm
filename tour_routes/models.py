@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -19,6 +20,7 @@ class Difficulty(models.TextChoices):
     HARD = 'hard', 'Тривалий / складний'
 
 class TourRoute(models.Model):
+    submitted_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="submitted_routes", editable=False)
     title = models.CharField(max_length=255, blank=True)
     short_description = models.CharField(max_length=500, blank=True)
     description = models.TextField(blank=True)

@@ -20,11 +20,11 @@ class RouteStopInline(admin.StackedInline):
 
 @admin.register(TourRoute)
 class TourRouteAdmin(admin.ModelAdmin):
-    list_display=['title','route_type','estimated_duration_minutes','difficulty','is_published']
+    list_display=['title','route_type','estimated_duration_minutes','difficulty','is_published','submitted_by']
     list_filter=['is_published','route_type','difficulty']
     search_fields=['title','description','stops__title']
     inlines=[RouteStopInline]
-    readonly_fields=['created_at','updated_at']
+    readonly_fields=['created_at','updated_at','submitted_by']
 
     def save_model(self, request, obj, form, change):
         # Inline formset validates the proposed stop list before anything is saved.

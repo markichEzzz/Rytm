@@ -6,6 +6,11 @@ from django.core.exceptions import ValidationError
 
 
 class EventCandidateAdminForm(forms.ModelForm):
+    confirm_extraction_review = forms.BooleanField(
+        required=False, label='I checked the extraction ambiguities against the source',
+        help_text='Confirm only after correcting or verifying the warnings shown above. Required publication fields still apply.',
+    )
+
     def __init__(self, *args, **kwargs):
         data = args[0] if args else kwargs.get('data')
         if data is not None and data.get('price_status') in ('free', 'unknown'):

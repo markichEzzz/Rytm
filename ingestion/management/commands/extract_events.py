@@ -41,7 +41,7 @@ class Command(BaseCommand):
         provider = configured_provider()
         if not (options['dry_run'] and options['debug_json']):
             self.stdout.write(f'Provider: {getattr(provider, "name", "deterministic")} | Model: {getattr(provider, "model", None) or "—"}')
-        counts = dict(processed=0, created=0, ignored=0, failed=0, skipped=0, candidate=0, review=0, enriched=0, pricing=0, linked=0, reused=0, manual_events=0, repair=0, repair_failed=0)
+        counts = dict(processed=0, created=0, drafts=0, approval_ready=0, ignored=0, failed=0, skipped=0, candidate=0, review=0, enriched=0, pricing=0, linked=0, reused=0, manual_events=0, repair=0, repair_failed=0)
         for item in items.order_by('pk')[:options['limit']]:
             outcome = extract_raw_source_item(item, provider=provider, dry_run=options['dry_run'],
                                               retry_failed=options['retry_failed'], reextract=options['reextract'], resolve_locations=options['resolve_locations'], force_prices=options['force_prices'])
@@ -50,7 +50,9 @@ class Command(BaseCommand):
             counts['pricing'] += outcome.pricing_enriched
             counts['linked'] += outcome.linked
             counts['reused'] += max(0, outcome.matched - outcome.linked)
-            counts['manual_events'] += len(outcome.unresolved)
+            counts['manual_events'] += sum(not entry.get('persisted') for entry in outcome.unresolved)
+            counts['drafts'] += outcome.needs_completion
+            counts['approval_ready'] += outcome.approval_ready
             if outcome.action != 'skipped' or not outcome.linked:
                 amount = outcome.repaired if outcome.action == 'repair' else len(outcome.candidates) or 1 if outcome.action == 'created' else outcome.ready or 1 if outcome.action == 'candidate' else 1
                 counts[outcome.action] += amount
@@ -67,6 +69,7 @@ class Command(BaseCommand):
                     'provenance': {name: sorted({entry['source'] for entry in entries}) for name, entries in outcome.result.evidence.items()} if outcome.result else {},
                     'events': [asdict(event) for event in outcome.results],
                     'detected': outcome.detected, 'candidate_ready': outcome.ready,
+                    'drafts_needing_completion': outcome.needs_completion, 'approval_ready': outcome.approval_ready,
                     'poster_diagnostics': (item.raw_metadata or {}).get('poster_layout', {}),
                     'poster_events': (item.raw_metadata or {}).get('event_extraction', {}).get('poster_events', []),
                     'unresolved': outcome.unresolved, 'duplicates': outcome.duplicates,
@@ -89,12 +92,14 @@ class Command(BaseCommand):
                     self.stdout.write(f'Location preview: {event.title or "unknown"}: {resolution.status} — {resolution.message}')
         self.stdout.write(
             f"Processed: {counts['processed']}\nCandidates created: {counts['created']}\n"
+            f"Draft candidates needing completion{' (preview)' if options['dry_run'] else ''}: {counts['drafts']}\n"
+            f"Candidates ready for review{' (preview)' if options['dry_run'] else ''}: {counts['approval_ready']}\n"
             f"Candidates repaired{' (preview)' if options['dry_run'] else ''}: {counts['repair']}\n"
             f"Candidate repairs needing review: {counts['repair_failed']}\n"
             f"Manual review without candidate: {counts['review']}\n"
             f"Duplicates linked{' (preview)' if options['dry_run'] else ''}: {counts['linked']}\n"
             f"Existing candidates reused{' (preview)' if options['dry_run'] else ''}: {counts['reused']}\n"
-            f"Manual review events: {counts['manual_events']}\nIgnored: {counts['ignored']}\nFailed: {counts['failed']}\nSkipped: {counts['skipped']}"
+            f"Unresolved entries without candidate: {counts['manual_events']}\nIgnored: {counts['ignored']}\nFailed: {counts['failed']}\nSkipped: {counts['skipped']}"
         )
         if options['dry_run']:
             self.stdout.write(f"Dry-run candidates (not saved): {counts['candidate']}")
@@ -143,7 +148,7 @@ class Command(BaseCommand):
                 self.stdout.write(f'Venue: {entry.get("venue_name") or "-"} | Address: {entry.get("address") or "-"} | Venue provenance: {entry["location_provenance"].get("venue_name", "unresolved")}')
         self.print_decisions(item, outcome, dry_run=True)
         ready = outcome.ready if outcome.results or outcome.unresolved else int(outcome.action == 'candidate')
-        self.stdout.write(f'\nSummary: Extracted: {outcome.detected if outcome.results or outcome.unresolved else len(events)} | Candidate-ready: {ready} | Needs manual completion: {len(outcome.unresolved)} | Duplicates: {outcome.duplicates} | Persisted: 0 (dry-run)')
+        self.stdout.write(f'\nSummary: Extracted: {outcome.detected if outcome.results or outcome.unresolved else len(events)} | Candidate-ready: {ready} | Needs manual completion: {outcome.needs_completion} | Duplicates: {outcome.duplicates} | Persisted: 0 (dry-run)')
 
     def print_decisions(self, item, outcome, *, dry_run):
         if not (outcome.decisions or outcome.unresolved or outcome.error):
@@ -171,7 +176,8 @@ class Command(BaseCommand):
             self.stdout.write('Candidate status: ' + ('would become complete' if dry_run else 'complete'))
         if not dry_run:
             for entry in outcome.unresolved:
-                self.stdout.write(f'{entry.get("title") or ('Candidate #' + str(entry['candidate_id']) if entry.get('candidate_id') else 'Unknown title')}: Not persisted — {entry.get("reason", "Manual completion required.")}')
+                state = f'Saved private draft Candidate #{entry["candidate_id"]}' if entry.get('persisted') and entry.get('candidate_id') else 'Linked to existing candidate/event' if entry.get('persisted') else 'Not persisted'
+                self.stdout.write(f'{entry.get("title") or ('Candidate #' + str(entry['candidate_id']) if entry.get('candidate_id') else 'Unknown title')}: {state} — {entry.get("reason", "Manual completion required.")}')
                 for field, messages in entry.get('reasons', {}).items():
                     for message in messages:
                         self.stdout.write(f'  {field}: {message}')

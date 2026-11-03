@@ -445,7 +445,7 @@ class ConcurrentSubmissionTests(APITransactionTestCase):
     def test_parallel_first_submissions_only_create_one_event(self):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Barrier
-        from django.db import close_old_connections
+        from django.db import close_old_connections, connections
         user = User.objects.create_user(username='parallel')
         barrier = Barrier(2)
         with TemporaryDirectory() as media, override_settings(MEDIA_ROOT=media, STORAGES={
@@ -461,8 +461,9 @@ class ConcurrentSubmissionTests(APITransactionTestCase):
                     barrier.wait(timeout=10)
                     return client.post('/api/events/', data, format='multipart').status_code
                 finally:
-                    close_old_connections()
-            with ThreadPoolExecutor(max_workers=2) as executor:
+                    connections.close_all()
+                    self.assertTrue(all(connection.connection is None for connection in connections.all(initialized_only=True)))
+            with patch.dict(connections['default'].settings_dict, {'CONN_MAX_AGE': 600}), ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(lambda _: submit(), range(2)))
         self.assertEqual(sorted(results), [201, 429])
         self.assertEqual(Event.objects.filter(submitted_by=user).count(), 1)

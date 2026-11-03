@@ -10,13 +10,19 @@ from django.utils import timezone
 from ingestion.collectors import CollectedSourceItem
 from ingestion.models import SourceAccount
 
-DEFAULT_LIMIT = 5
-MAX_LIMIT = 20
+DEFAULT_LIMIT = 2
+MAX_LIMIT = 3
 RECENT_DAYS = 14
 
 
 class InstagramCollectionError(Exception):
-    """Safe user-facing failure; provider responses/cookies must never be logged."""
+    """Fixed diagnostic code and optional normalized progress, never raw responses."""
+    def __init__(self, message, *, reason='unexpected_structure', stop_run=False, partial_items=()):
+        super().__init__(message)
+        self.reason = reason
+        self.stop_run = stop_run
+        self.partial_items = tuple(partial_items)
+
 
 
 class InstaloaderProvider:
@@ -26,7 +32,7 @@ class InstaloaderProvider:
 
     def _client(self):
         if self.unavailable:
-            raise InstagramCollectionError(self.unavailable)
+            raise self.unavailable
         if self.loader:
             return self.loader
         loader = instaloader.Instaloader(
@@ -52,22 +58,28 @@ class InstaloaderProvider:
                 raise InstagramCollectionError('Set INSTAGRAM_PASSWORD or INSTAGRAM_SESSION_FILE with INSTAGRAM_USERNAME.')
         except Exception as error:
             loader.close()
-            self.unavailable = (str(error) if isinstance(error, InstagramCollectionError) else
-                                'Instagram authentication/session failed; configure a valid local session or credentials. No retry was made.')
-            raise InstagramCollectionError(self.unavailable) from None
+            from .instagram_safety import instaloader_failure
+            classified = instaloader_failure(error)
+            self.unavailable = classified if classified.stop_run else InstagramCollectionError(
+                'Instagram authentication/session failed; configure a valid local session or credentials. No retry was made.',
+                reason='login_required', stop_run=True,
+            )
+            raise self.unavailable from None
         self.loader = loader
         return loader
 
-    def fetch_recent(self, username, limit):
+    def fetch_recent(self, username, limit, *, known_ids=frozenset()):
         loader = self._client()
+        items = []
         cutoff = timezone.now() - timedelta(days=RECENT_DAYS)
         try:
             profile = instaloader.Profile.from_username(loader.context, username)
             if profile.is_private:
-                raise InstagramCollectionError('Private accounts are outside the public collection scope.')
-            items = []
+                raise InstagramCollectionError('Private accounts are outside the public collection scope.', reason='private_account')
             # Limit scanned posts as well as returned posts; pinned old posts never trigger history crawling.
             for post in islice(profile.get_posts(), limit):
+                if post.shortcode in known_ids:
+                    continue
                 published = post.date_utc
                 if timezone.is_naive(published):
                     published = published.replace(tzinfo=datetime_timezone.utc)
@@ -88,21 +100,12 @@ class InstaloaderProvider:
         except InstagramCollectionError:
             raise
         except Exception as error:
-            # Do not disclose provider exception text, HTTP bodies, session paths or secrets.
-            if isinstance(error, instaloader.AbortDownloadException):
-                if '"404 ' in str(error):
-                    message = 'Instagram account/resource not found; no retry was made.'
-                else:
-                    message = 'Instagram blocked access or requested a challenge/rate limit; no retry was made.'
-                    self.unavailable = message  # Avoid repeated requests after a run-wide block.
-            elif isinstance(error, instaloader.ProfileNotExistsException):
-                message = 'Instagram account not found; no retry was made.'
-            elif isinstance(error, instaloader.LoginRequiredException):
-                message = 'Instagram requires authentication; configure a valid local session or credentials.'
-                self.unavailable = message
-            else:
-                message = f'Instagram metadata request failed ({type(error).__name__}); no retry was made.'
-            raise InstagramCollectionError(message) from None
+            from .instagram_safety import instaloader_failure
+            failure = instaloader_failure(error)
+            failure.partial_items = tuple(items)
+            if failure.stop_run:
+                self.unavailable = failure
+            raise failure from None
 
     def close(self):
         if self.loader:
@@ -134,7 +137,8 @@ class InstagramCollector:
         ).first()
         if source is None or not re.fullmatch(r'[A-Za-z0-9_.]+', source.username):
             raise InstagramCollectionError('Only enabled configured Instagram accounts may be collected.')
-        return self.provider.fetch_recent(source.username, self.limit)
+        known_ids = frozenset(source.raw_items.values_list("external_id", flat=True))
+        return self.provider.fetch_recent(source.username, self.limit, known_ids=known_ids)
 
     def close(self):
         self.provider.close()

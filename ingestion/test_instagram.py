@@ -8,6 +8,7 @@ from django.core.management import call_command, CommandError
 from django.test import TestCase, SimpleTestCase
 from django.utils import timezone
 
+from .instagram_test_support import isolate_instagram_schedule
 from .collectors import CollectedSourceItem
 from .models import SourceAccount, RawSourceItem, EventCandidate
 from .providers.instagram import InstagramCollector, InstaloaderProvider, InstagramCollectionError
@@ -15,6 +16,7 @@ from .providers.instagram import InstagramCollector, InstaloaderProvider, Instag
 
 class CollectionCommandTests(TestCase):
     def setUp(self):
+        isolate_instagram_schedule(self)
         self.source = SourceAccount.objects.create(username='festrepublic')
         # Guard all tests against accidental HTTP, even if a provider mock is removed later.
         network = patch('requests.sessions.Session.request', side_effect=AssertionError('Tests must not access the network'))
@@ -69,7 +71,8 @@ class CollectionCommandTests(TestCase):
         self.assertEqual(raw.raw_text, 'Original private caption')
         self.assertEqual(raw.raw_metadata, {'provider': 'test'})
         self.assertEqual(raw.extraction_status, 'ignored')
-        self.assertIn('Existing items skipped: 1', output)
+        self.assertIn('Sources attempted: 0', output)
+        self.collector.fetch_items.assert_called_once()
 
     def test_disabled_and_non_instagram_sources_skipped(self):
         self.source.enabled = False
@@ -108,7 +111,15 @@ class CollectionCommandTests(TestCase):
         previous = timezone.now() - timedelta(days=1)
         self.source.last_checked_at = previous
         self.source.save()
-        self.collector.fetch_items.side_effect = [RuntimeError('password=PRIVATESECRET cookie=PRIVATECOOKIE'), [self.item()]]
+        # Equal due times keep the failing source first. A never-checked account
+        # would correctly be scheduled before this previously checked source.
+        other.last_checked_at = previous
+        other.save()
+        def fetch(source):
+            if source.pk == self.source.pk:
+                raise RuntimeError('password=PRIVATESECRET cookie=PRIVATECOOKIE')
+            return [self.item(raw_metadata={'collected_source': source.username})]
+        self.collector.fetch_items.side_effect = fetch
         stdout, stderr = StringIO(), StringIO()
         with self.assertLogs('ingestion.management.commands.collect_instagram', level='WARNING') as logs:
             with self.assertRaises(CommandError):
@@ -117,12 +128,30 @@ class CollectionCommandTests(TestCase):
         self.assertIn('Processed sources: 2', stdout.getvalue())
         self.assertIn('Failures: 1', stdout.getvalue())
         self.assertEqual(RawSourceItem.objects.get().source_account, other)
+        self.assertEqual(RawSourceItem.objects.get().raw_metadata['collected_source'], other.username)
+        self.assertEqual([call.args[0].pk for call in self.collector.fetch_items.call_args_list], [self.source.pk, other.pk])
         self.source.refresh_from_db()
         other.refresh_from_db()
         self.assertEqual(self.source.last_checked_at, previous)
         self.assertIsNotNone(other.last_checked_at)
         self.assertTrue(self.source.enabled)
-        self.sleep.assert_called_once_with(2)
+        self.sleep.assert_called_once_with(60)
+
+    def test_never_checked_priority_preserves_actual_source_association(self):
+        other = SourceAccount.objects.create(username='other')
+        self.source.last_checked_at = timezone.now() - timedelta(days=1)
+        self.source.save()
+        def fetch(source):
+            if source.pk == self.source.pk:
+                raise RuntimeError('PRIVATE_RESPONSE')
+            return [self.item(raw_metadata={'collected_source': source.username})]
+        self.collector.fetch_items.side_effect = fetch
+        with self.assertRaises(CommandError):
+            self.run_collection()
+        self.assertEqual([call.args[0].pk for call in self.collector.fetch_items.call_args_list], [other.pk, self.source.pk])
+        raw = RawSourceItem.objects.get()
+        self.assertEqual(raw.source_account, other)
+        self.assertEqual(raw.raw_metadata['collected_source'], other.username)
 
     def test_dry_run_no_database_changes(self):
         previous = timezone.now() - timedelta(days=1)
@@ -174,7 +203,7 @@ class CollectionCommandTests(TestCase):
         collector = InstagramCollector(limit=3, provider=provider)
         provider.fetch_recent.return_value = [self.item()]
         self.assertEqual(len(collector.fetch_items(self.source)), 1)
-        provider.fetch_recent.assert_called_once_with('festrepublic', 3)
+        provider.fetch_recent.assert_called_once_with('festrepublic', 3, known_ids=frozenset())
         self.source.enabled = False
         self.source.save()
         for source in (self.source, SourceAccount(username='not-configured')):
@@ -240,7 +269,7 @@ class InstagramProviderTests(SimpleTestCase):
     def test_rate_block_no_retry_or_further_network_for_run(self):
         self.profiles.side_effect = instaloader.AbortDownloadException('"429 Too Many Requests" secret-response')
         for username in ('one', 'two'):
-            with self.assertRaisesMessage(InstagramCollectionError, 'blocked access') as caught:
+            with self.assertRaisesMessage(InstagramCollectionError, 'rate limited') as caught:
                 self.provider.fetch_recent(username, 3)
             self.assertNotIn('secret-response', str(caught.exception))
         self.profiles.assert_called_once()

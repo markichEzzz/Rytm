@@ -121,9 +121,17 @@ class ImageExtractionTests(TestCase):
         self.raw.raw_metadata['image_urls'] = [URL, URL + '?second', URL + '?third', URL + '?fourth']
         self.fetch.side_effect = [ImageTextError('image_http_failure'), b'good', b'good']
         result = extract_raw_source_item(self.raw)
-        self.assertEqual(result.action, 'review')
+        self.assertEqual(result.action, 'created')
         self.assertIn('title', result.unresolved[0]['reasons'])
-        self.assertFalse(EventCandidate.objects.exists())
+        self.assertEqual(result.candidate.status, 'new')
+        self.assertEqual(result.candidate.title, '')
+        self.assertIsNone(result.candidate.event_id)
+        from events.models import Event
+        from .services import validate_approval
+        from django.core.exceptions import ValidationError
+        self.assertFalse(Event.objects.exists())
+        with self.assertRaises(ValidationError):
+            validate_approval(result.candidate)
         self.raw.refresh_from_db()
         self.assertEqual(self.raw.raw_metadata['image_text_status'], 'partial')
         self.assertEqual(self.raw.raw_metadata['image_text_images_attempted'], 3)
@@ -161,6 +169,10 @@ class ImageExtractionTests(TestCase):
 
 
 class RealRuntimePersistenceTests(TestCase):
+    def setUp(self):
+        from .instagram_test_support import isolate_instagram_schedule
+        isolate_instagram_schedule(self)
+
     def test_real_sync_playwright_loop_stops_before_orm_and_next_source(self):
         SourceAccount.objects.create(username='first')
         SourceAccount.objects.create(username='second')

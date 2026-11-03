@@ -214,8 +214,20 @@ class LocationExtractionTests(TestCase):
         review = next(entry for entry in outcome.unresolved if entry['title'] == 'Гурт 0')
         self.assertEqual(review['venue_name'], 'FESTrepublic')
         self.assertEqual(review['location_provenance']['venue_name'], 'shared_post_context')
-        self.assertEqual(outcome.ready, 1)
+        # One valid event plus a distinct invalid-price draft: two pipeline records,
+        # not one event counted both as ready and unresolved.
+        self.assertEqual(outcome.ready, 2)
+        self.assertEqual(len(outcome.decisions), 2)
+        self.assertEqual(len({entry['fingerprint'] for entry in outcome.decisions}), 2)
+        self.assertEqual({entry['title'] for entry in outcome.decisions}, {'Гурт 0', 'Гурт 1'})
         self.assertFalse(EventCandidate.objects.exists())
+        self.raw.refresh_from_db()
+        saved = self.extract()
+        self.assertEqual(saved.ready, 2)
+        self.assertEqual(len(saved.candidates), 2)
+        self.assertEqual({candidate.title for candidate in saved.candidates}, {'Гурт 0', 'Гурт 1'})
+        self.assertIsNone(next(candidate for candidate in saved.candidates if candidate.title == 'Гурт 0').price)
+        self.assertTrue(all(candidate.status == 'new' and candidate.event_id is None for candidate in saved.candidates))
 
     def test_missing_new_date_can_enrich_a_unique_existing_source_entry(self):
         self.shared_post(header='Жовтневі події')

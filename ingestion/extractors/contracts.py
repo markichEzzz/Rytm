@@ -154,6 +154,36 @@ def validate_result(result):
     return replace(result, **values)
 
 
+def partial_result_from_mapping(data):
+    """Keep independently valid facts after a single field fails schema validation.
+
+    Invalid values become unknown; this never supplies defaults for missing facts.
+    Evidence grounding still happens in the extraction orchestrator.
+    """
+    result = ExtractionResult(True, event_count=1)
+    if not isinstance(data, dict):
+        return result
+    for name in ('title', 'description', 'venue_name', 'address', 'category',
+                 'confidence', 'evidence', 'location_provenance', 'ambiguities', 'extraction_notes',
+                 'start_time', 'end_time', 'price'):
+        value = data.get(name)
+        if value is None:
+            continue
+        try:
+            if name in ('start_time', 'end_time') and isinstance(value, str):
+                value = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            if name == 'price' and isinstance(value, str):
+                try:
+                    value = Decimal(value)
+                except InvalidOperation:
+                    from .parsers import parse_price, preprocess
+                    value = parse_price(preprocess(value)[0])[0]
+            result = validate_result(replace(result, **{name: value}))
+        except (ExtractionError, TypeError, ValueError, InvalidOperation):
+            continue
+    return result
+
+
 EVIDENCE_FIELDS = ('title', 'start_time', 'end_time', 'venue_name', 'address', 'price', 'category')
 
 EXTRACTION_JSON_SCHEMA = {
@@ -245,15 +275,10 @@ class ExtractionBatch:
                     'reasons': {getattr(error,'field','schema'): [str(error) if isinstance(error,ExtractionError) else 'Invalid field type or value.']},
                     'category': entry.get('category') if entry.get('category') in CATEGORIES else None,
                     'price': None, 'price_status': 'unknown'}
-                # Preserve only bounded, separately validated location proposals;
-                # a bad date/price does not erase independently grounded source facts.
-                try:
-                    proposal = validate_result(ExtractionResult(True, title=review['title'],
-                        venue_name=entry.get('venue_name'), address=entry.get('address'),
-                        evidence={name: entry.get('evidence', {}).get(name, []) for name in ('venue_name', 'address')}))
-                    review.update(venue_name=proposal.venue_name, address=proposal.address, evidence=proposal.evidence)
-                except (ExtractionError, TypeError, AttributeError):
-                    pass
+                from .hybrid import result_mapping
+                from events.pricing import infer_price_status
+                partial = partial_result_from_mapping(entry)
+                review.update(result_mapping(partial), price_status=infer_price_status(partial.price))
                 unresolved.append(review)
         shared = data.get('shared_context') or {}
         if shared:

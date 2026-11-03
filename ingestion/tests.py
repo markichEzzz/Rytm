@@ -287,7 +287,7 @@ class ConcurrentApprovalTests(TransactionTestCase):
     def test_parallel_cross_account_approvals_create_one_event(self):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Barrier
-        from django.db import close_old_connections
+        from django.db import close_old_connections, connections
 
         reviewer = get_user_model().objects.create_superuser('concurrent-reviewer', 'reviewer@example.com', None)
         start = timezone.now() + timedelta(days=7)
@@ -313,9 +313,10 @@ class ConcurrentApprovalTests(TransactionTestCase):
                 except ValidationError:
                     return False
             finally:
-                close_old_connections()
+                connections.close_all()
+                self.assertTrue(all(connection.connection is None for connection in connections.all(initialized_only=True)))
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with patch.dict(connections['default'].settings_dict, {'CONN_MAX_AGE': 600}), ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(approve, [candidate.pk for candidate in candidates]))
         self.assertEqual(sorted(results), [False, True])
         self.assertEqual(Event.objects.count(), 1)

@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.management import call_command, CommandError
-from django.db import close_old_connections
+from django.db import close_old_connections, connections
 from django.test import TestCase, SimpleTestCase, TransactionTestCase, RequestFactory
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -353,8 +353,9 @@ class ConcurrentExtractionTests(TransactionTestCase):
                 provider.extract.side_effect = response
                 return extract_raw_source_item(RawSourceItem.objects.select_related('source_account').get(pk=pk), provider=provider).action
             finally:
-                close_old_connections()
-        with ThreadPoolExecutor(max_workers=2) as executor:
+                connections.close_all()
+                self.assertTrue(all(connection.connection is None for connection in connections.all(initialized_only=True)))
+        with patch.dict(connections['default'].settings_dict, {'CONN_MAX_AGE': 600}), ThreadPoolExecutor(max_workers=2) as executor:
             actions = list(executor.map(extract, [raw.pk, raw.pk]))
         self.assertEqual(sorted(actions), ['created', 'skipped'])
         self.assertEqual(EventCandidate.objects.count(), 1)

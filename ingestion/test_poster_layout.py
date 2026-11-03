@@ -156,8 +156,9 @@ class PosterExtractionTests(TestCase):
     def test_cross_group_date_cannot_create_confident_wrong_event(self):
         wrong=replace(result(),start_time=datetime(2026,10,26,20,tzinfo=KYIV),evidence={**result().evidence,'start_time':[{'source':'ocr','quote':'26 жовтня 20:00'}]})
         self.setup_poster(rows()+rows('Гурт Б',26,20,400),[wrong,result('Гурт Б',26,20)])
-        outcome=self.extract();self.assertEqual(len(outcome.candidates),1)
-        self.assertEqual(outcome.candidate.title,'Гурт Б');self.assertTrue(outcome.unresolved)
+        outcome=self.extract();self.assertEqual(len(outcome.candidates),2)
+        self.assertEqual(outcome.candidates[1].title,'Гурт Б');self.assertTrue(outcome.unresolved)
+        self.assertIsNone(outcome.candidates[0].start_time)
         self.assertIn('start_time',outcome.unresolved[0]['reasons'])
 
     def test_prices_do_not_cross_and_from_price_preserved(self):
@@ -173,13 +174,15 @@ class PosterExtractionTests(TestCase):
     def test_low_confidence_critical_date_requires_review(self):
         blocks=rows();blocks[1]['confidence']=15
         self.setup_poster(blocks,[result()]);outcome=self.extract()
-        self.assertFalse(outcome.candidates);self.assertTrue(outcome.unresolved)
+        self.assertEqual(len(outcome.candidates),1);self.assertTrue(outcome.unresolved)
+        self.assertIsNone(outcome.candidate.start_time)
         self.assertIn('low-confidence',' '.join(outcome.results[0].ambiguities))
 
     def test_ambiguous_titles_around_one_time_are_not_guessed(self):
         blocks=[block('Концерт: Гурт А',50),block('25 жовтня 19:00',90),block('Концерт: Гурт Б',130)]
         self.setup_poster(blocks,[result(price=None),result('Гурт Б',price=None)])
-        outcome=self.extract();self.assertFalse(outcome.candidates);self.assertEqual(len(outcome.unresolved),2)
+        outcome=self.extract();self.assertEqual(len(outcome.candidates),2);self.assertEqual(len(outcome.unresolved),2)
+        self.assertTrue(all(candidate.start_time is None for candidate in outcome.candidates))
         self.assertIn('unassigned time',' '.join(outcome.results[0].ambiguities))
 
     def test_caption_multi_events_survive_weak_image_ocr(self):
@@ -277,7 +280,8 @@ class PosterExtractionTests(TestCase):
             item=result(title,hour=hour,price=None)
             events.append(replace(item,venue_name=None,evidence={'title':[{'source':'ocr','quote':title}],
                 'start_time':[{'source':'ocr','quote':'25–27 жовтня'},{'source':'ocr','quote':f'{hour}:00 Концерт: {title}'}]}))
-        self.setup_poster(blocks,events);outcome=self.extract();self.assertFalse(outcome.candidates)
+        self.setup_poster(blocks,events);outcome=self.extract();self.assertEqual(len(outcome.candidates),2)
+        self.assertTrue(all(candidate.start_time is None for candidate in outcome.candidates))
         self.assertEqual(len(outcome.unresolved),2)
 
     def test_weekday_heading_uses_source_date_and_kyiv_timezone(self):
@@ -341,7 +345,9 @@ class PosterExtractionTests(TestCase):
             events.append(replace(result(title,hour=hour,price=None),venue_name=None,
                 evidence={'title':[{'source':'ocr','quote':title}],
                     'start_time':[{'source':'ocr','quote':'25 жовтня'},{'source':'ocr','quote':f'{hour}:00 Концерт: {title}'}]}))
-        self.setup_poster(blocks,events);self.assertFalse(self.extract().candidates)
+        self.setup_poster(blocks,events);outcome=self.extract()
+        self.assertEqual(len(outcome.candidates),2)
+        self.assertTrue(all(candidate.start_time is None for candidate in outcome.candidates))
 
     def test_similar_names_same_slot_remain_distinct_sibling_candidates(self):
         self.setup_poster(rows('Гурт Альфа')+rows('Гурт Альфа live',25,19,400),[result('Гурт Альфа'),result('Гурт Альфа live')])
@@ -355,4 +361,6 @@ class PosterExtractionTests(TestCase):
 
     def test_low_confidence_date_word_not_hidden_by_high_line_average(self):
         blocks=rows();blocks[1]['confidence']=90;blocks[1]['confidence_min']=5
-        self.setup_poster(blocks,[result()]);self.assertFalse(self.extract().candidates)
+        self.setup_poster(blocks,[result()]);outcome=self.extract()
+        self.assertEqual(len(outcome.candidates),1)
+        self.assertIsNone(outcome.candidate.start_time)

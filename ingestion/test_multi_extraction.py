@@ -102,11 +102,13 @@ class MultiExtractionTests(TestCase):
         self.transport.return_value = response(self.mapping)
         outcome = self.extract()
         self.assertEqual(outcome.detected, 4)
-        self.assertEqual(outcome.ready, 2)
+        self.assertEqual(outcome.ready, 4)
         self.assertEqual(len(outcome.unresolved), 2)
         self.raw.refresh_from_db()
         self.assertEqual(len(self.raw.raw_metadata['event_extraction']['unresolved']), 2)
-        self.assertEqual(EventCandidate.objects.count(), 2)
+        self.assertEqual(EventCandidate.objects.count(), 4)
+        self.assertTrue(all(entry['persisted'] for entry in outcome.unresolved))
+        self.assertEqual(self.raw.extraction_status, 'extracted')
 
     def test_repeated_mentions_not_duplicated(self):
         self.set_events()
@@ -204,7 +206,8 @@ class MultiExtractionTests(TestCase):
         first['evidence']['start_time'] = second['evidence']['start_time']
         self.transport.return_value = response(self.mapping)
         outcome = self.extract()
-        self.assertEqual(len(outcome.candidates), 1)
+        self.assertEqual(len(outcome.candidates), 2)
+        self.assertIsNone(outcome.candidates[0].start_time)
         self.assertEqual(len(outcome.unresolved), 1)
 
     def test_unknown_category_and_clamped_confidence(self):
@@ -258,8 +261,8 @@ class MultiExtractionTests(TestCase):
         with patch('ingestion.management.commands.extract_events.configured_provider', return_value=self.provider):
             call_command('extract_events', source='festrepublic', limit=1, dry_run=True, stdout=output)
         self.assertIn('Detected events: 3', output.getvalue())
-        self.assertIn('Candidate-ready: 2', output.getvalue())
-        self.assertIn('Needs manual completion: 1', output.getvalue())
+        self.assertIn('Candidate-ready: 3', output.getvalue())
+        self.assertIn('Needs manual completion: 3', output.getvalue())
         self.assertIn('Persisted: 0 (dry-run)', output.getvalue())
         self.raw.refresh_from_db()
         self.assertEqual(self.raw.raw_metadata, before)

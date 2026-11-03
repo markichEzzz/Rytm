@@ -45,18 +45,18 @@ class DiscoveryTests(SimpleTestCase):
         self.assertEqual(safe_page_url('https://www.instagram.com/festrepublic/?token=SECRET'), 'https://www.instagram.com/festrepublic/')
         self.assertNotIn('SECRET', safe_page_url('https://www.instagram.com/challenge/SECRET/?token=SECRET'))
 
-    def test_lazy_links_discovered_after_one_small_scroll(self):
+    def test_missing_links_do_not_trigger_lazy_history_requests(self):
         page = FakePage()
         page.links = []
         page.mouse.wheel.side_effect = lambda *args: page.links.extend(['/festrepublic/reel/Lazy/'])
-        self.assertEqual(discover_profile_posts(page, 'festrepublic', 3), ['https://www.instagram.com/reel/Lazy/'])
-        page.mouse.wheel.assert_called_once_with(0, 650)
+        self.assertEqual(discover_profile_posts(page, 'festrepublic', 3), [])
+        page.mouse.wheel.assert_not_called()
 
-    def test_empty_discovery_stops_after_two_scrolls_and_does_not_claim_private(self):
+    def test_empty_discovery_never_scrolls_and_does_not_claim_private(self):
         page = FakePage()
         page.links = []
         self.assertEqual(discover_profile_posts(page, 'festrepublic', 3), [])
-        self.assertEqual(page.mouse.wheel.call_count, 2)
+        page.mouse.wheel.assert_not_called()
         error = empty_profile_error(page, 'festrepublic')
         self.assertIn('loaded but no post/reel links', error)
         self.assertNotIn('private', error)
@@ -90,7 +90,10 @@ class DiscoveryTests(SimpleTestCase):
         dialog.first.is_visible.return_value = True
         dialog.first.get_by_text.return_value.count.return_value = 1
         page.get_by_role = Mock(return_value=Mock(filter=Mock(return_value=dialog)))
-        dismiss_harmless_overlays(page)
+        with self.assertRaises(InstagramCollectionError) as caught:
+            dismiss_harmless_overlays(page)
+        self.assertEqual(caught.exception.reason, 'verification')
+        self.assertTrue(caught.exception.stop_run)
         dialog.first.get_by_role.assert_not_called()
 
 

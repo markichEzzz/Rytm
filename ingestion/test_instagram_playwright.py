@@ -12,6 +12,7 @@ from django.core.management import call_command, CommandError
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
+from .instagram_test_support import isolate_instagram_schedule
 from .models import SourceAccount, RawSourceItem, EventCandidate
 from .providers.instagram import InstagramCollectionError, InstaloaderProvider, selected_provider
 from .providers.instagram_browser import InstagramBrowser, SESSION_REQUIRED, profile_directory, session_authenticated
@@ -55,7 +56,12 @@ class FakePage:
         self.published = timezone.now() - timedelta(days=1)
         self.visits = []
         self.bad_posts = set()
+        self.handlers = {}
+        self.messages = []
         self.mouse = Mock()
+
+    def on(self, event, handler):
+        self.handlers[event] = handler
 
     def goto(self, url, **kwargs):
         self.visits.append(url)
@@ -78,8 +84,11 @@ class FakePage:
         result.filter.return_value.count.return_value = 0
         return result
 
-    def get_by_text(self, *args, **kwargs):
-        return Mock(count=Mock(return_value=0))
+    def get_by_text(self, pattern, **kwargs):
+        found = any(pattern.search(text) for text in self.messages)
+        result = Mock(count=Mock(return_value=int(found)))
+        result.first.is_visible.return_value = found
+        return result
 
     def locator(self, selector):
         return FakeLocator(self, selector)
@@ -261,6 +270,7 @@ class HtmlAndBrowserTests(SimpleTestCase):
 
 class PlaywrightCommandTests(TestCase):
     def setUp(self):
+        isolate_instagram_schedule(self)
         self.source = SourceAccount.objects.create(username='festrepublic')
         self.browser = FakeBrowser()
         provider = patch('ingestion.providers.instagram_playwright.InstagramBrowser', return_value=self.browser)

@@ -52,6 +52,8 @@ class OpenAIEventExtractionProvider:
         if cache.get('fingerprint') == fingerprint and cache.get('provider') == self.name:
             try:
                 if 'batch' in cache:
+                    if 'provider_batch' in cache:
+                        return ExtractionBatch.from_mapping(cache['provider_batch'])
                     from dataclasses import replace
                     return replace(ExtractionBatch.from_mapping(cache['batch']), unresolved=tuple(cache.get('unresolved_schema', [])))
                 return ExtractionResult.from_mapping(cache['result'])

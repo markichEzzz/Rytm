@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from django.contrib import admin
 from django.core.management import call_command
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 from requests import Timeout
 
@@ -69,6 +70,25 @@ class HybridTests(TestCase):
         if mapping is not None:
             self.transport.return_value = response(mapping)
         return extract_raw_source_item(self.raw, provider=self.provider, **kwargs)
+
+    def assert_incomplete_fallback(self, outcome, *, dry_run):
+        self.assertEqual(outcome.action, 'candidate' if dry_run else 'created')
+        self.assertEqual(outcome.ready, 1)
+        self.assertEqual(outcome.needs_completion, 1)
+        self.assertIsNone(outcome.result.start_time)
+        self.assertFalse(Event.objects.exists())
+        if dry_run:
+            self.assertFalse(EventCandidate.objects.exists())
+            self.raw.refresh_from_db()
+            self.assertEqual(self.raw.extraction_status, 'new')
+        else:
+            candidate = outcome.candidate
+            self.assertEqual(candidate.status, 'new')
+            self.assertIsNone(candidate.start_time)
+            self.assertIsNone(candidate.event_id)
+            with self.assertRaises(ValidationError):
+                from .services import validate_approval
+                validate_approval(candidate)
 
     def test_ambiguous_dates_resolved_but_flagged_with_evidence(self):
         result = self.run_result()
@@ -145,13 +165,14 @@ class HybridTests(TestCase):
         for mapping in ({'is_event': True}, {**suggestion(), 'latitude': 49.8}):
             with self.subTest(mapping=list(mapping)), self.assertLogs('ingestion.extraction', level='WARNING'):
                 result = self.run_result(mapping, dry_run=True)
-            self.assertEqual(result.action, 'review')
+            self.assert_incomplete_fallback(result, dry_run=True)
             self.assertIn('deterministic fallback', result.result.extraction_notes)
         broken = response({})
         broken.iter_content.return_value = [b'not JSON TEST_SECRET_KEY']
         self.transport.return_value = broken
         with self.assertLogs('ingestion.extraction', level='WARNING') as logs:
             result = self.run_result(dry_run=True)
+        self.assert_incomplete_fallback(result, dry_run=True)
         self.assertIn('deterministic fallback', result.result.extraction_notes)
         self.assertNotIn('TEST_SECRET_KEY', str(logs.output))
 
@@ -159,8 +180,7 @@ class HybridTests(TestCase):
         self.transport.side_effect = Timeout('TEST_SECRET_KEY')
         with self.assertLogs('ingestion.extraction', level='WARNING') as logs:
             result = self.run_result()
-        self.assertEqual(result.action, 'review')
-        self.assertFalse(EventCandidate.objects.exists())
+        self.assert_incomplete_fallback(result, dry_run=False)
         self.assertIsNone(result.result.start_time)
         self.assertEqual(self.raw.raw_metadata['event_extraction']['fallback_reason'], 'provider_timeout')
         self.assertNotIn('TEST_SECRET_KEY', str(logs.output))
@@ -171,7 +191,7 @@ class HybridTests(TestCase):
             self.provider = OpenAIEventExtractionProvider(api_key=key, model=model, transport=self.transport)
             with self.assertLogs('ingestion.extraction', level='WARNING'):
                 result = self.run_result(dry_run=True)
-            self.assertEqual(result.action, 'review')
+            self.assert_incomplete_fallback(result, dry_run=True)
         self.transport.assert_not_called()
 
     def test_configuration_default_and_explicit(self):
@@ -181,7 +201,7 @@ class HybridTests(TestCase):
             configured = configured_provider()
             self.assertIsInstance(configured, OpenAIEventExtractionProvider)
             with self.assertLogs('ingestion.extraction', level='WARNING'):
-                self.assertEqual(extract_raw_source_item(self.raw, provider=configured, dry_run=True).action, 'review')
+                self.assert_incomplete_fallback(extract_raw_source_item(self.raw, provider=configured, dry_run=True), dry_run=True)
 
     def test_idempotence_preserves_admin_edits(self):
         candidate = self.run_result().candidate
@@ -267,14 +287,14 @@ class HybridTests(TestCase):
         rejected.status_code = 429
         self.transport.return_value = rejected
         with self.assertLogs('ingestion.extraction', level='WARNING'):
-            self.assertEqual(self.run_result(dry_run=True).action, 'review')
+            self.assert_incomplete_fallback(self.run_result(dry_run=True), dry_run=True)
         self.transport.assert_called_once()
         refused = response({})
         refused.iter_content.return_value = [json.dumps({'status': 'completed', 'output': [
             {'type': 'message', 'content': [{'type': 'refusal', 'refusal': 'SECRET_RESPONSE'}]}]}).encode()]
         self.transport.return_value = refused
         with self.assertLogs('ingestion.extraction', level='WARNING') as logs:
-            self.assertEqual(self.run_result(dry_run=True).action, 'review')
+            self.assert_incomplete_fallback(self.run_result(dry_run=True), dry_run=True)
         self.assertNotIn('SECRET_RESPONSE', str(logs.output))
 
     def test_non_event_remains_ignored(self):

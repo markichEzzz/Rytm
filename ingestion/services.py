@@ -5,6 +5,8 @@ import math
 import re
 import unicodedata
 from zoneinfo import ZoneInfo
+from copy import copy
+import json
 
 from django.contrib.gis.geos import Point
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -85,8 +87,23 @@ def build_candidate_description(candidate):
     return ' '.join(parts)
 
 
-def validate_approval(candidate):
-    candidate.full_clean()
+def extraction_warnings(candidate):
+    warnings = []
+    for line in candidate.extraction_notes.splitlines():
+        if line.startswith('[Extraction confirmed]'):
+            warnings = []
+        elif line.startswith('[Extraction ambiguity] '):
+            try:
+                value = json.loads(line.removeprefix('[Extraction ambiguity] '))
+                if isinstance(value, list):
+                    warnings.extend(item for item in value if isinstance(item, str))
+            except ValueError:
+                warnings.append('Check extraction notes against the source.')
+    return warnings
+
+
+def approval_field_errors(candidate):
+    """Side-effect-free publication requirements, also used by admin draft diagnostics."""
     errors = {}
     for field in ('title', 'address', 'category'):
         if not getattr(candidate, field).strip():
@@ -113,6 +130,27 @@ def validate_approval(candidate):
         errors['confidence'] = 'Confidence must be finite.'
     if not candidate.public_photo and not (candidate.use_source_image_as_public_photo and source_image_url(candidate)):
         errors['public_photo'] = 'Upload a photo for publication or explicitly authorize the source image before approval.'
+    if extraction_warnings(candidate):
+        errors['extraction_notes'] = 'Confirm the extraction ambiguities against the source before approval.'
+    return errors
+
+
+def candidate_completion_errors(candidate):
+    """Validate editable facts without DB uniqueness/FK lookups or mutating a draft."""
+    preview = copy(candidate)
+    errors = {}
+    try:
+        preview.full_clean(exclude=[field.name for field in preview._meta.fields if field.is_relation],
+                           validate_unique=False, validate_constraints=False)
+    except ValidationError as error:
+        errors.update(error.message_dict)
+    errors.update(approval_field_errors(preview))
+    return errors
+
+
+def validate_approval(candidate):
+    candidate.full_clean()
+    errors = approval_field_errors(candidate)
     if errors:
         raise ValidationError(errors)
 

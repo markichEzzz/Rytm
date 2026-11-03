@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from .extractors.contracts import (
     ExtractionContext, ExtractionError, ExtractionResult, EventExtractionProvider, ExtractionBatch, KYIV, validate_result,
+    partial_result_from_mapping,
 )
 from .extractors.parsers import deterministic_extract, parse_price, preprocess, source_texts
 from .extractors.hybrid import observed_facts, result_mapping, ground_semantic_result, batch_mapping, scoped_event_evidence
@@ -15,7 +16,7 @@ from .extractors.location_evidence import location_hints, validated_shared_conte
 from .image_text import prepare_image_text
 from .poster_layout import poster_context, associate_event
 from .models import EventCandidate, RawSourceItem
-from .services import build_candidate_description
+from .services import build_candidate_description, candidate_completion_errors
 from events.pricing import infer_price_status
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ class ExtractionOutcome:
     decisions: tuple = ()
     repaired: int = 0
     repairs: tuple = ()
+    needs_completion: int = 0
+    approval_ready: int = 0
 
 
 def provider_failure_code(error):
@@ -254,8 +257,7 @@ def extract_raw_source_item(raw_item, *, provider=None, dry_run=False, retry_fai
         if isinstance(result, ExtractionBatch):
             return store_batch(raw_item, result, eligible, dry_run=dry_run, resolve_locations=resolve_locations, force_prices=force_prices)
         # Single-result/deterministic fallbacks use the same readiness and storage
-        # decisions as semantic batches. Model fields permit incomplete admin drafts;
-        # that does not make them valid extracted candidates.
+        # decisions as semantic batches, including private incomplete drafts.
         multiple = result.is_event and (result.event_count is not None and result.event_count != 1
                                        or 'Multiple or unresolved event count' in ' '.join(result.ambiguities))
         unresolved = ()
@@ -309,7 +311,7 @@ def event_identity(result):
     from datetime import timezone as utc
     from .services import normalize_fact
     identity = {'title': normalize_fact(result.title),
-                'start_time': result.start_time.astimezone(utc.utc).isoformat(),
+                'start_time': result.start_time.astimezone(utc.utc).isoformat() if result.start_time else None,
                 'location': normalize_fact(result.venue_name or result.address)}
     import json
     return sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest(), identity
@@ -369,10 +371,9 @@ def prepare_batch(raw_item, batch, context):
         reason = 'Bounded source/layout input was truncated; compare the full poster for omitted events.'
         unresolved.append({'title': None, 'reason': reason, 'reasons': {'poster_layout': [reason]}})
     for entry in unresolved:
-        if not entry.get('title'):
+        if not entry.get('title') and not entry.get('start_time'):
             continue
-        proposal = ExtractionResult(True, title=entry['title'], venue_name=entry.get('venue_name'),
-                                    address=entry.get('address'), evidence=entry.get('evidence', {}), event_count=1)
+        proposal = partial_result_from_mapping(entry)
         proposal = scoped_event_evidence(proposal, context) if batch.event_count > 1 else proposal
         proposal = ground_semantic_result(proposal, context, multi_event=True)
         for name in ('venue_name', 'address'):
@@ -380,8 +381,7 @@ def prepare_batch(raw_item, batch, context):
             if not getattr(proposal, name) and shared.get(name) and not (name == 'address' and individual):
                 evidence = {**proposal.evidence, name: shared['evidence'][name]}
                 proposal = ground_semantic_result(replace(proposal, **{name: shared[name]}, evidence=evidence), context, multi_event=True)
-        entry.update(venue_name=proposal.venue_name, address=proposal.address, evidence=proposal.evidence,
-                     location_provenance=proposal.location_provenance)
+        entry.update(result_mapping(proposal))
     for event in batch.events:
         try:
             missing_location = {name for name in ('venue_name', 'address') if not getattr(event, name)}
@@ -416,7 +416,7 @@ def prepare_batch(raw_item, batch, context):
             event = replace(event, description=build_candidate_description(draft).replace('Подія: .', 'Назву події потрібно уточнити.'))
             results.append(event)
         except Exception:
-            unresolved.append({'title': event.title, 'start_time': event.start_time.isoformat() if event.start_time else None,
+            unresolved.append({**result_mapping(event),
                                'reason': 'Event evidence/values require manual correction.'})
     # A model can return fewer entries than the visible poster groups. Do not
     # silently mark the source extracted or invent a candidate for an omitted row.
@@ -453,20 +453,53 @@ def store_batch(raw_item, batch, eligible, *, dry_run, resolve_locations=False, 
         for entry in batch.unresolved if entry.get('location_provenance'))]
     seen = set()
     identities_seen = []
-    for event in batch.events:
-        if not event.title or not event.start_time or event.start_time <= timezone.now():
+    # Schema-invalid entries can still carry independently validated/grounded facts.
+    # Generic poster warnings/event-count uncertainty are not concrete event identities.
+    events = [(event, None) for event in batch.events]
+    for entry in batch.unresolved if batch.is_event else ():
+        if set(entry.get('reasons', {})) & {'poster_layout', 'event_group', 'event_count', 'duplicate'}:
+            continue
+        partial = partial_result_from_mapping(entry)
+        if partial.title or partial.start_time:
+            events.append((partial, entry))
+    draft_entries = {}
+    for event, original_entry in events:
+        if (not event.title and not event.start_time) or (event.start_time and event.start_time <= timezone.now()):
             reasons={}
             if not event.title: reasons['title']=['Missing or unsupported title.']
             if not event.start_time: reasons['start_time']=['Missing, ambiguous, or unsupported start time.']
             elif event.start_time <= timezone.now(): reasons['start_time']=['event start is in the past']
-            unresolved.append({**result_mapping(event),'price_status':infer_price_status(event.price), 'reason': 'Title and valid future start are required.', 'reasons':reasons})
+            if original_entry is None:
+                unresolved.append({**result_mapping(event),'price_status':infer_price_status(event.price), 'reason': 'No reliably identifiable upcoming event.', 'reasons':reasons})
             continue
         fingerprint, identity = event_identity(event)
         if fingerprint in seen or any(previous['title'] == identity['title'] and previous['start_time'] == identity['start_time'] and (not previous['location'] or not identity['location']) for previous in identities_seen):
             duplicates += 1
+            if original_entry is not None:
+                unresolved.remove(original_entry)
             continue
         candidate = candidate_from_result(raw_item, event)
         candidate.source_fingerprint = fingerprint
+        if original_entry is not None:
+            unresolved.remove(original_entry)
+        completion = candidate_completion_errors(candidate)
+        if completion or event.ambiguities or original_entry:
+            import json
+            reasons = {name: [message] if isinstance(message, str) else message for name, message in completion.items()}
+            if original_entry:
+                reasons.update(original_entry.get('reasons', {}))
+            entry = {**result_mapping(event), 'price_status': infer_price_status(event.price),
+                     'reason': 'Needs manual completion before approval.', 'reasons': reasons,
+                     'draft_fingerprint': fingerprint, 'persisted': False}
+            warnings = list(event.ambiguities)
+            if original_entry:
+                warnings.append(original_entry.get('reason', 'Extraction values require confirmation.'))
+            candidate.extraction_notes = (candidate.extraction_notes + '\n[Manual completion] ' +
+                '; '.join(f'{name}: {"; ".join(messages)}' for name, messages in reasons.items()) +
+                ('\n[Extraction ambiguity] ' + json.dumps(warnings, ensure_ascii=False) if warnings else '')).strip()
+            if not event.title or not event.start_time or event.ambiguities or original_entry:
+                unresolved.append(entry)
+                draft_entries[fingerprint] = entry
         try:
             candidate.full_clean(validate_constraints=False, exclude=['raw_source_item'] if dry_run and raw_item.pk is None else None)
             decision, _ = persistence_decision(candidate, existing, identities, identity, dry_run=dry_run)
@@ -485,8 +518,10 @@ def store_batch(raw_item, batch, eligible, *, dry_run, resolve_locations=False, 
     audit = dict(raw_item.raw_metadata.get('event_extraction', {}))
     audit.update(unresolved=unresolved, candidate_ready=len(ready), duplicates=duplicates, decisions=decisions)
     raw_item.raw_metadata['event_extraction'] = audit
+    drafts = sum(bool(candidate_completion_errors(candidate)) for _, candidate, _ in ready)
     outcome = dict(results=tuple(batch.events), unresolved=tuple(unresolved), detected=batch.event_count,
-                   ready=len(ready), duplicates=duplicates, decisions=tuple(decisions))
+                   ready=len(ready), duplicates=duplicates, decisions=tuple(decisions),
+                   needs_completion=drafts, approval_ready=len(ready)-drafts)
     if dry_run:
         identities = (raw_item.raw_metadata or {}).get('candidate_identities', {})
         existing = {item.source_fingerprint: item for item in raw_item.candidates.all()} if raw_item.pk else {}
@@ -556,17 +591,23 @@ def store_batch(raw_item, batch, eligible, *, dry_run, resolve_locations=False, 
             accepted += 1
             if decision['decision'] == 'existing':
                 matched += 1
+                if fingerprint in draft_entries:
+                    draft_entries[fingerprint].update(persisted=True, candidate_id=old.pk)
                 continue  # Never overwrite facts, review state, or moderator corrections.
             from .deduplication import store_observation
             candidate, added = store_observation(candidate)
             if not added:
                 matched += 1
                 linked += 1
+                if fingerprint in draft_entries:
+                    draft_entries[fingerprint].update(persisted=True, candidate_id=candidate.pk if candidate else None)
                 continue
             existing[fingerprint] = candidate
             identities[fingerprint] = identity
             decision['target'] = f'ingestion.EventCandidate #{candidate.pk}'
             created.append(candidate)
+            if fingerprint in draft_entries:
+                draft_entries[fingerprint].update(persisted=True, candidate_id=candidate.pk)
             pending_resolution[candidate.pk] = candidate
         outcome.update(ready=accepted, unresolved=tuple(unresolved), decisions=tuple(actual_decisions))
         raw_item.raw_metadata['event_extraction'].update(candidate_ready=accepted, unresolved=unresolved,
@@ -574,7 +615,12 @@ def store_batch(raw_item, batch, eligible, *, dry_run, resolve_locations=False, 
         metadata = {**(current.raw_metadata or {}), **{key: value for key, value in raw_item.raw_metadata.items()
                     if key.startswith('image_text') or key in ('event_extraction', 'poster_layout')}, 'candidate_identities': identities}
         current.raw_metadata = metadata
-        current.extraction_status = (RawSourceItem.ExtractionStatus.NEW if unresolved or not accepted and batch.is_event
+        pending = any(not entry.get('persisted') for entry in unresolved)
+        drafts = sum(bool(candidate_completion_errors(candidate)) for candidate in created)
+        outcome.update(needs_completion=drafts, approval_ready=len(created)-drafts)
+        current.raw_metadata['event_extraction'].update(drafts_needing_completion=drafts,
+                                                       approval_ready=len(created)-drafts)
+        current.extraction_status = (RawSourceItem.ExtractionStatus.NEW if pending or not accepted and batch.is_event
             else RawSourceItem.ExtractionStatus.EXTRACTED if accepted else RawSourceItem.ExtractionStatus.IGNORED)
         current.save(update_fields=['raw_metadata', 'extraction_status', 'updated_at'])
     if resolve_locations:

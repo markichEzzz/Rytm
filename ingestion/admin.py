@@ -13,7 +13,8 @@ from urllib.parse import urlencode
 from .extraction import configured_provider, extract_raw_source_item
 
 from .models import SourceAccount, RawSourceItem, EventCandidate, EventSourceObservation
-from .services import approve_candidate, review_candidate, build_candidate_description, find_possible_duplicate
+from .services import (approve_candidate, review_candidate, build_candidate_description, find_possible_duplicate,
+                       candidate_completion_errors, extraction_warnings)
 
 
 @admin.register(SourceAccount)
@@ -102,9 +103,30 @@ class ObservationInline(admin.TabularInline):
         return False
 
 
+class CompletionFilter(admin.SimpleListFilter):
+    title = 'Approval readiness'
+    parameter_name = 'completion'
+
+    def lookups(self, request, model_admin):
+        return [('incomplete', 'Needs manual completion'), ('ready', 'Ready for approval')]
+
+    def queryset(self, request, queryset):
+        if self.value() not in ('incomplete', 'ready'):
+            return queryset
+        # Small moderation queue: share the live validator instead of a stale stored flag.
+        pending = queryset.filter(status=EventCandidate.Status.NEW).select_related('raw_source_item')
+        ids = [candidate.pk for candidate in pending
+               if bool(candidate_completion_errors(candidate)) == (self.value() == 'incomplete')]
+        return queryset.filter(pk__in=ids)
+
+
 @admin.register(EventCandidate)
 class EventCandidateAdmin(admin.ModelAdmin):
     inlines = [ObservationInline]
+
+    @admin.display(description='Extraction review')
+    def confirm_extraction_review(self, obj):
+        return 'Published candidate; moderate the linked Event.'
 
     @admin.display(description="Duplicate state")
     def duplicate_state(self,obj):
@@ -118,6 +140,7 @@ class EventCandidateAdmin(admin.ModelAdmin):
 
     form = EventCandidateAdminForm
     fieldsets = (
+        ('Approval readiness', {'fields': ('completion_warning', 'confirm_extraction_review')}),
         ('Event facts', {'fields': ('title', 'description', 'start_time', 'end_time', 'category', 'price_status', 'price')}),
         ('Location', {'fields': ('venue_name', 'address', 'address_provenance', 'location_provenance', 'location_picker', ('latitude', 'longitude'))}),
         ('Publication photo', {'fields': ('source_image_preview', 'public_photo', 'use_source_image_as_public_photo',
@@ -146,6 +169,8 @@ class EventCandidateAdmin(admin.ModelAdmin):
         return format_html('<div class="source-image-preview"><a href="{}" target="_blank" rel="noopener noreferrer"><img class="candidate-source-image" src="{}" referrerpolicy="no-referrer" alt="Private source poster"></a><p class="source-image-error" hidden>Source image unavailable or expired. Upload a public photo manually.</p><p><a href="{}" target="_blank" rel="noopener noreferrer">Open source image</a></p></div>', url, url, url)
 
     def save_model(self, request, obj, form, change):
+        if (getattr(form, 'cleaned_data', None) or {}).get('confirm_extraction_review') is True:
+            obj.extraction_notes = (obj.extraction_notes + '\n[Extraction confirmed] Moderator verified source ambiguities.').strip()
         candidate_fields = {'title', 'start_time', 'end_time', 'category', 'description'} & set(form.changed_data)
         if candidate_fields:
             obj.extraction_notes = (obj.extraction_notes + '\n[Candidate facts] Moderator edited: ' + ','.join(sorted(candidate_fields))).strip()
@@ -165,14 +190,34 @@ class EventCandidateAdmin(admin.ModelAdmin):
             obj.source_photo_authorized_at = timezone.now() if obj.use_source_image_as_public_photo else None
         super().save_model(request, obj, form, change)
 
-    list_display = ('title', 'submitted_by', 'duplicate_state', 'source_account', 'start_time', 'venue_name', 'address', 'category',
+    list_display = ('title', 'completion_state', 'submitted_by', 'duplicate_state', 'source_account', 'start_time', 'venue_name', 'address', 'category',
                     'price_status', 'price', 'confidence', 'status', 'source_url', 'created_at')
-    list_filter = ('status', 'raw_source_item__source_account', 'category', 'start_time')
+    list_filter = (CompletionFilter, 'status', 'raw_source_item__source_account', 'category', 'start_time')
     search_fields = ('title', 'address', 'raw_source_item__source_account__username')
     autocomplete_fields = ('raw_source_item',)
-    readonly_fields = ('submitted_by', 'status', 'event', 'reviewed_at', 'reviewed_by', 'created_at', 'updated_at',
+    readonly_fields = ('completion_warning', 'submitted_by', 'status', 'event', 'reviewed_at', 'reviewed_by', 'created_at', 'updated_at',
                        'source_photo_authorized_at', 'source_photo_authorized_by', 'address_provenance', 'location_provenance', 'location_picker', 'source_image_preview', 'source_account', 'source_fingerprint', 'source_post', 'sibling_candidates', 'raw_source_text', 'raw_image_text', 'semantic_extraction', 'poster_diagnostics', 'public_description', 'possible_duplicate')
     actions = ('resolve_location', 'approve_selected', 'reject_selected', 'mark_duplicate', 'return_to_review')
+
+    @admin.display(description='Approval readiness')
+    def completion_state(self, obj):
+        if obj.status != EventCandidate.Status.NEW:
+            return obj.get_status_display()
+        return 'Needs manual completion' if candidate_completion_errors(obj) else 'Ready for approval'
+
+    @admin.display(description='Missing or ambiguous fields')
+    def completion_warning(self, obj):
+        if obj is None:
+            return 'Save a private draft, then complete the required publication fields.'
+        if obj.status == EventCandidate.Status.APPROVED:
+            return 'Already approved. Moderate the linked Event in Events admin.'
+        errors = candidate_completion_errors(obj)
+        if not errors:
+            return 'Ready for approval. Publication still requires the explicit approval action.'
+        details = [(name, '; '.join(value) if isinstance(value, list) else value) for name, value in errors.items()]
+        details.extend(('Ambiguous', warning) for warning in extraction_warnings(obj))
+        return format_html('<strong>Needs manual completion before approval</strong><ul>{}</ul>',
+            format_html_join('', '<li>{}: {}</li>', details))
 
     @admin.display(description='Location source')
     def location_provenance(self, obj):
@@ -232,7 +277,7 @@ class EventCandidateAdmin(admin.ModelAdmin):
     def get_readonly_fields(self, request, obj=None):
         fields = super().get_readonly_fields(request, obj)
         if obj and obj.status == EventCandidate.Status.APPROVED:
-            fields += ('raw_source_item', 'title', 'description', 'start_time', 'end_time', 'venue_name',
+            fields += ('confirm_extraction_review', 'raw_source_item', 'title', 'description', 'start_time', 'end_time', 'venue_name',
                        'address', 'latitude', 'longitude', 'price', 'price_status', 'category', 'source_url',
                        'source_image_url', 'public_photo', 'use_source_image_as_public_photo', 'confidence', 'extraction_notes')
         return fields

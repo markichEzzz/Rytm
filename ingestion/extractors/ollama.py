@@ -46,6 +46,8 @@ class OllamaEventExtractionProvider:
         cache = (raw_item.raw_metadata or {}).get('event_extraction', {})
         if cache.get('fingerprint') == fingerprint and cache.get('provider') == self.name:
             try:
+                if 'provider_batch' in cache:
+                    return ExtractionBatch.from_mapping(cache['provider_batch'])
                 return replace(ExtractionBatch.from_mapping(cache['batch']),
                                unresolved=tuple(cache.get('unresolved_schema', [])))
             except (ExtractionError, KeyError, TypeError, ValueError):

@@ -15,7 +15,7 @@ from django.utils import timezone
 from .instagram_test_support import isolate_instagram_schedule
 from .models import SourceAccount, RawSourceItem, EventCandidate
 from .providers.instagram import InstagramCollectionError, InstaloaderProvider, selected_provider
-from .providers.instagram_browser import InstagramBrowser, SESSION_REQUIRED, profile_directory, session_authenticated
+from .providers.instagram_browser import InstagramBrowser, SESSION_REQUIRED, profile_directory, session_authenticated, profile_configuration
 from .providers.instagram_html import normalize_post_html, recent_post_links, post_timestamp
 from .providers.instagram_playwright import PlaywrightInstagramProvider
 
@@ -34,6 +34,9 @@ class FakeLocator:
 
     def wait_for(self, **kwargs):
         return None
+
+    def is_visible(self):
+        return bool(self.count())
 
     def evaluate_all(self, expression, arg=None):
         if self.selector == 'a[href]':
@@ -200,11 +203,33 @@ class HtmlAndBrowserTests(SimpleTestCase):
 
     def test_selection_default_and_explicit_no_fallback(self):
         with patch.dict(os.environ, {}, clear=True):
+            self.assertIsInstance(selected_provider(), PlaywrightInstagramProvider)
+        with patch.dict(os.environ, {'INSTAGRAM_COLLECTION_PROVIDER': 'instaloader'}):
             self.assertIsInstance(selected_provider(), InstaloaderProvider)
         with patch.dict(os.environ, {'INSTAGRAM_COLLECTION_PROVIDER': 'playwright'}):
             self.assertIsInstance(selected_provider(), PlaywrightInstagramProvider)
         with patch.dict(os.environ, {'INSTAGRAM_COLLECTION_PROVIDER': 'unknown'}), self.assertRaises(InstagramCollectionError):
             selected_provider()
+
+    def test_login_and_default_collector_launch_the_same_profile(self):
+        with TemporaryDirectory() as folder, patch.dict(os.environ, {}, clear=True), patch(
+            'ingestion.providers.instagram_browser.profile_directory', return_value=Path(folder)), patch(
+            'ingestion.providers.instagram_browser.sync_playwright') as factory:
+            context = factory.return_value.start.return_value.chromium.launch_persistent_context.return_value
+            context.pages = [FakePage()]
+            login = InstagramBrowser(headed_login=True).start()
+            login_config = profile_configuration(headed_login=True)
+            login.close()
+            collector = selected_provider()
+            collector._browser()
+            collect_config = profile_configuration()
+            collector.close()
+            launches = factory.return_value.start.return_value.chromium.launch_persistent_context.call_args_list
+            self.assertEqual([call.kwargs['user_data_dir'] for call in launches], [folder, folder])
+            self.assertTrue(all(not call.kwargs['headless'] for call in launches))
+            self.assertEqual(login_config, collect_config)
+            self.assertTrue(all('storage_state' not in call.kwargs for call in launches))
+            context.add_cookies.assert_not_called()
 
     def test_unauthenticated_session_clear_error_and_no_posts(self):
         browser = FakeBrowser()
@@ -305,3 +330,16 @@ class PlaywrightCommandTests(TestCase):
         call_command('collect_instagram', stdout=StringIO())
         self.browser.start.assert_not_called()
         self.assertFalse(RawSourceItem.objects.exists())
+
+    def test_small_source_alias_verbose_and_explicit_browser_override(self):
+        SourceAccount.objects.create(username='other')
+        output = StringIO()
+        with patch.dict(os.environ, {'INSTAGRAM_COLLECTION_PROVIDER': 'instaloader'}):
+            call_command('collect_instagram', '--source', '@festrepublic', '--limit-posts', '1', '--limit-sources', '1',
+                         '--provider', 'playwright', verbosity=2, stdout=output)
+        self.assertEqual(RawSourceItem.objects.count(), 1)
+        self.assertEqual(RawSourceItem.objects.get().source_account, self.source)
+        self.assertEqual(self.browser.page.visits, ['https://www.instagram.com/festrepublic/', 'https://www.instagram.com/p/Good/'])
+        self.assertIn('Instagram provider: playwright', output.getvalue())
+        self.assertIn('Collection browser:', output.getvalue())
+        self.assertIn('"caption_available": true', output.getvalue())

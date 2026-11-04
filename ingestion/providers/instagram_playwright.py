@@ -12,7 +12,7 @@ from ingestion.instagram_policy import InstagramPolicy
 from .instagram import InstagramCollectionError, MAX_LIMIT, RECENT_DAYS
 from .instagram_browser import InstagramBrowser, session_authenticated, has_session_cookie
 from .instagram_html import normalize_post_html, post_identity, post_timestamp
-from .instagram_discovery import discover_profile_posts, profile_diagnostics
+from .instagram_discovery import discover_profile_posts, profile_diagnostics, failure_diagnostics
 from .instagram_safety import page_failure, failure
 
 logger = logging.getLogger(__name__)
@@ -25,18 +25,24 @@ class PlaywrightInstagramProvider:
         self.unavailable = None
         self.diagnostic_sink = None
         self.restriction = None
+        self.stage = 'browser_launch'
+        self.navigation_status = None
 
     def set_diagnostics(self, sink):
         self.diagnostic_sink = sink
 
     def _diagnostics(self, data):
         if self.diagnostic_sink:
-            self.diagnostic_sink(json.dumps(data, ensure_ascii=False))
+            try:
+                self.diagnostic_sink(json.dumps(data, ensure_ascii=False))
+            except Exception:
+                # Diagnostic I/O must never mask a security refusal or resume collection.
+                logger.warning('Instagram sanitized diagnostic output unavailable.')
 
     def _response(self, response):
         # Catch API 429 responses even when the document is HTTP 200. No URLs/bodies logged.
         if response.status == 429 and urlparse(response.url).hostname in ('www.instagram.com', 'instagram.com'):
-            self.restriction = failure('rate_limit')
+            self.restriction = failure('rate_limit', marker='instagram_response_http_429')
 
     def _browser(self):
         if self.unavailable:
@@ -51,7 +57,7 @@ class PlaywrightInstagramProvider:
     def _check(self, browser, status=None):
         error = self.restriction or page_failure(browser.page, status)
         if error is None and not has_session_cookie(browser.context):
-            error = failure('login_required')
+            error = failure('login_required', marker='session_cookie_absent')
         if error:
             if error.stop_run:
                 self.unavailable = error
@@ -67,27 +73,32 @@ class PlaywrightInstagramProvider:
                 self.unavailable = visible
                 raise visible
         time.sleep(InstagramPolicy.load().navigation_delay)
+        self.navigation_status = None
         response = browser.page.goto(url, wait_until='domcontentloaded')
+        self.navigation_status = response.status if response else None
         self._check(browser, response.status if response else None)
         try:
             browser.page.locator('main, article, [role="main"]').first.wait_for(state='attached', timeout=10000)
             browser.page.locator('a[href*="/direct/"], a[href*="/accounts/edit"], a[href*="/accounts/activity"], a[href*="/your_activity"]').first.wait_for(state='attached', timeout=10000)
         except PlaywrightTimeoutError:
             self._check(browser)
-            raise failure('timeout') from None
+            raise failure('navigation_timeout', marker='expected_dom_wait_timeout') from None
         self._check(browser)
         if not session_authenticated(browser.context, browser.page):
             # Missing navigation with an existing cookie is not proof of expired login.
-            raise failure('unexpected_structure')
+            raise failure('unexpected_structure', marker='authenticated_navigation_absent_with_cookie')
 
     def fetch_recent(self, username, limit, *, known_ids=frozenset()):
         if not re.fullmatch(r'[A-Za-z0-9_.]+', username) or not 1 <= limit <= MAX_LIMIT:
             raise InstagramCollectionError('Instagram source username or post limit is invalid.', reason='configuration')
         items = []
         try:
+            self.stage = 'browser_launch'
             browser = self._browser()
+            self.stage = 'profile_navigation'
             self._navigate(browser, f'https://www.instagram.com/{username}/')
             try:
+                self.stage = 'profile_link_discovery'
                 posts = discover_profile_posts(browser.page, username, limit)
                 self._check(browser)
             finally:
@@ -103,13 +114,16 @@ class PlaywrightInstagramProvider:
                 raise failure('unexpected_structure')
             cutoff = timezone.now() - timedelta(days=RECENT_DAYS)
             parsed_count = known_count = 0
+            last_post_error = None
             for url in posts:
                 identity = post_identity(url)
                 if identity[0] in known_ids:
                     known_count += 1
                     continue
                 try:
+                    self.stage = 'post_navigation'
                     self._navigate(browser, url)
+                    self.stage = 'post_parsing'
                     current = post_identity(browser.page.url)
                     if not current or current[0] != identity[0]:
                         raise failure('unexpected_structure')
@@ -127,30 +141,51 @@ class PlaywrightInstagramProvider:
                         items.append(item)
                 except PlaywrightTimeoutError:
                     self._check(browser)
-                    logger.warning('Instagram post skipped: reason=timeout; no retry.')
+                    last_post_error = failure('navigation_timeout', marker='post_navigation_timeout')
+                    logger.warning('Instagram post skipped: reason=navigation_timeout; no retry.')
                 except Exception as error:
                     if self.unavailable or self.restriction or (isinstance(error, InstagramCollectionError) and error.stop_run):
                         raise self.unavailable or self.restriction or error
                     reason = error.reason if isinstance(error, InstagramCollectionError) else 'unexpected_structure'
+                    if isinstance(error, InstagramCollectionError):
+                        last_post_error = error
                     logger.warning('Instagram post skipped: reason=%s; no retry.', reason)
             self._check(browser)
             self._diagnostics({'source_username': username, 'inspected_links': len(posts), 'known_links_skipped': known_count,
                                'normalized_items': parsed_count, 'recent_items': len(items)})
             if parsed_count == 0 and known_count == 0:
+                if last_post_error:
+                    raise last_post_error
                 raise InstagramCollectionError('None of the bounded Instagram posts had usable structures; no retry was made.')
             return items
         except InstagramCollectionError as error:
             error.partial_items = tuple(items)
+            self._annotate_failure(error)
             if error.stop_run:
                 self.unavailable = error
             raise
         except PlaywrightTimeoutError:
-            raise failure('timeout') from None
+            error = failure('navigation_timeout', marker='navigation_timeout')
+            self._annotate_failure(error)
+            raise error from None
         except Exception:
-            raise failure('unexpected_structure') from None
+            error = failure('unexpected_structure')
+            self._annotate_failure(error)
+            raise error from None
         finally:
             # End Playwright's sync asyncio lifetime BEFORE any synchronous ORM writes.
             self.close()
+
+    def _annotate_failure(self, error):
+        try:
+            error.diagnostics = failure_diagnostics(self.browser.page, error, stage=self.stage,
+                                                    status=self.navigation_status) if self.browser else {
+                'stage': self.stage, 'reason': error.reason, 'page_state_marker': getattr(error, 'marker', error.reason)}
+        except Exception:
+            error.diagnostics = {'stage': self.stage, 'reason': error.reason, 'page_state_marker': 'diagnostics_unavailable'}
+        if self.restriction:
+            error.diagnostics['observed_response_http_status'] = 429
+        self._diagnostics(error.diagnostics)
 
     def close(self):
         if self.browser:

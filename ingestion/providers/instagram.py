@@ -17,11 +17,12 @@ RECENT_DAYS = 14
 
 class InstagramCollectionError(Exception):
     """Fixed diagnostic code and optional normalized progress, never raw responses."""
-    def __init__(self, message, *, reason='unexpected_structure', stop_run=False, partial_items=()):
+    def __init__(self, message, *, reason='unexpected_structure', stop_run=False, partial_items=(), diagnostics=None):
         super().__init__(message)
         self.reason = reason
         self.stop_run = stop_run
         self.partial_items = tuple(partial_items)
+        self.diagnostics = diagnostics or {}
 
 
 
@@ -113,8 +114,16 @@ class InstaloaderProvider:
             self.loader = None
 
 
-def selected_provider():
-    name = os.environ.get('INSTAGRAM_COLLECTION_PROVIDER', 'instaloader').strip().lower()
+def configured_provider_name():
+    # Browser login and normal collection must share the same authentication stack.
+    name = os.environ.get('INSTAGRAM_COLLECTION_PROVIDER', 'playwright').strip().lower()
+    if name not in ('playwright', 'instaloader'):
+        raise InstagramCollectionError('INSTAGRAM_COLLECTION_PROVIDER must be instaloader or playwright.', reason='configuration')
+    return name
+
+
+def selected_provider(name=None):
+    name = name or configured_provider_name()
     if name == 'instaloader':
         return InstaloaderProvider()
     if name == 'playwright':

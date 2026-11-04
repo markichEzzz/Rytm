@@ -101,7 +101,7 @@ class InstagramSchedule:
     def failed(self, source, reason, stop_run):
         failures = min(20, self.data['sources'].get(str(source.pk), {}).get('failures', 0) + 1)
         delay = min(self.policy.failure_interval * 2 ** min(failures - 1, 4), max(self.policy.failure_interval, 21600))
-        if reason in ('private_account', 'not_found', 'unavailable'):
+        if reason in ('private_account', 'not_found', 'unavailable', 'private_profile', 'profile_unavailable', 'post_unavailable'):
             delay = max(delay, self.policy.empty_interval)
         self.data['sources'][str(source.pk)] = {'next_check': timezone.now().timestamp() + delay, 'failures': failures}
         if stop_run:

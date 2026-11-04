@@ -99,16 +99,16 @@ class RestrictionTests(SimpleTestCase):
         sleeper=patch('ingestion.providers.instagram_playwright.time.sleep');sleeper.start();self.addCleanup(sleeper.stop)
 
     def test_url_and_http_restrictions_are_distinct_and_safe(self):
-        for path,code in [('/accounts/login/','login_required'),('/challenge/SECRET/','challenge'),('/checkpoint/','challenge'),('/accounts/verify/','verification')]:
+        for path,code in [('/accounts/login/','login_required'),('/challenge/SECRET/','challenge'),('/checkpoint/','checkpoint'),('/accounts/verify/','verification')]:
             page=FakePage();page.url='https://www.instagram.com'+path
             error=page_failure(page)
             self.assertEqual(error.reason,code);self.assertTrue(error.stop_run);self.assertNotIn('SECRET',str(error))
-        for status,code,stop in [(429,'rate_limit',True),(403,'access_blocked',True),(401,'login_required',True),(404,'not_found',False),(503,'unavailable',False)]:
+        for status,code,stop in [(429,'rate_limit',True),(403,'access_blocked',True),(401,'login_required',True),(404,'profile_unavailable',False),(503,'profile_unavailable',False)]:
             error=page_failure(FakePage(),status)
             self.assertEqual((error.reason,error.stop_run),(code,stop))
 
     def test_visible_security_states_stop_without_any_navigation(self):
-        for text,code in [('Try Again Later','temporary_block'),('We detected suspicious activity.','temporary_block'),("Confirm it's you",'verification'),('Checkpoint required','challenge'),('Please wait a few minutes before you try again','rate_limit')]:
+        for text,code in [('Try Again Later','temporary_block'),('We detected suspicious activity.','temporary_block'),("Confirm it's you",'verification'),('Checkpoint required','checkpoint'),('Please wait a few minutes before you try again','rate_limit')]:
             browser=FakeBrowser();browser.page.messages=[text]
             provider=PlaywrightInstagramProvider(browser_factory=lambda:browser)
             with self.assertRaises(InstagramCollectionError) as caught:provider.fetch_recent('one',2)
@@ -124,6 +124,8 @@ class RestrictionTests(SimpleTestCase):
         with self.assertRaises(InstagramCollectionError) as caught:
             PlaywrightInstagramProvider(browser_factory=lambda:browser).fetch_recent('one',2)
         self.assertEqual(caught.exception.reason,'rate_limit');self.assertNotIn('SECRET',str(caught.exception))
+        self.assertEqual(caught.exception.diagnostics['navigation_http_status'],200)
+        self.assertEqual(caught.exception.diagnostics['observed_response_http_status'],429)
         self.assertEqual(len(browser.page.visits),1)
 
     def test_post_challenge_carries_only_previously_normalized_progress(self):
@@ -155,14 +157,84 @@ class RestrictionTests(SimpleTestCase):
         browser=FakeBrowser();browser.page.goto=Mock(side_effect=PlaywrightTimeoutError('SECRET'))
         with self.assertRaises(InstagramCollectionError) as caught:
             PlaywrightInstagramProvider(browser_factory=lambda:browser).fetch_recent('one',2)
-        self.assertEqual(caught.exception.reason,'timeout');self.assertFalse(caught.exception.stop_run)
+        self.assertEqual(caught.exception.reason,'navigation_timeout');self.assertFalse(caught.exception.stop_run)
         self.assertNotIn('SECRET',str(caught.exception))
 
     def test_private_and_missing_sources_do_not_signal_global_block(self):
         page=FakePage();page.messages=['This account is private']
-        self.assertEqual(page_failure(page).reason,'private_account');self.assertFalse(page_failure(page).stop_run)
+        self.assertEqual(page_failure(page).reason,'private_profile');self.assertFalse(page_failure(page).stop_run)
         page.messages=["Sorry, this page isn't available."]
-        self.assertEqual(page_failure(page).reason,'unavailable')
+        self.assertEqual(page_failure(page).reason,'profile_unavailable')
+
+    def test_changed_authenticated_dom_is_structure_error_not_a_block(self):
+        browser = FakeBrowser()
+        browser.page.authenticated = False  # Cookie exists, expected navigation is absent.
+        with self.assertRaises(InstagramCollectionError) as caught:
+            PlaywrightInstagramProvider(browser_factory=lambda: browser).fetch_recent('one', 1)
+        self.assertEqual(caught.exception.reason, 'unexpected_structure')
+        self.assertFalse(caught.exception.stop_run)
+        self.assertEqual(caught.exception.diagnostics['stage'], 'profile_navigation')
+        self.assertEqual(caught.exception.diagnostics['page_state_marker'], 'authenticated_navigation_absent_with_cookie')
+
+    def test_missing_post_links_without_empty_profile_marker_is_not_a_block(self):
+        browser = FakeBrowser()
+        browser.page.links = []
+        with self.assertRaises(InstagramCollectionError) as caught:
+            PlaywrightInstagramProvider(browser_factory=lambda: browser).fetch_recent('one', 1)
+        self.assertEqual(caught.exception.reason, 'unexpected_structure')
+        self.assertFalse(caught.exception.stop_run)
+        self.assertEqual(caught.exception.diagnostics['stage'], 'profile_link_discovery')
+
+    def test_failure_snapshot_redacts_title_and_challenge_tokens(self):
+        browser = FakeBrowser()
+        original = browser.page.goto
+        def goto(url, **kwargs):
+            response = original(url, **kwargs)
+            browser.page.url = 'https://www.instagram.com/checkpoint/SECRET/?session=SECRET'
+            return response
+        browser.page.goto = goto
+        browser.page.title = Mock(return_value='Private message SECRET')
+        with self.assertRaises(InstagramCollectionError) as caught:
+            PlaywrightInstagramProvider(browser_factory=lambda: browser).fetch_recent('one', 1)
+        details = caught.exception.diagnostics
+        self.assertEqual(details['reason'], 'checkpoint')
+        self.assertEqual(details['current_url_path'], '/checkpoint/[details redacted]')
+        self.assertEqual(details['navigation_http_status'], 200)
+        self.assertEqual(details['page_state_marker'], 'url_checkpoint')
+        self.assertNotIn('SECRET', json.dumps(details))
+
+    def test_post_unavailable_is_distinct_from_profile_unavailable(self):
+        page = FakePage()
+        page.url = 'https://www.instagram.com/p/Good/'
+        error = page_failure(page, 404)
+        self.assertEqual(error.reason, 'post_unavailable')
+        self.assertFalse(error.stop_run)
+
+    def test_diagnostic_output_failure_cannot_mask_a_security_stop(self):
+        browser = FakeBrowser()
+        browser.page.messages = ['Checkpoint required']
+        provider = PlaywrightInstagramProvider(browser_factory=lambda: browser)
+        provider.set_diagnostics(Mock(side_effect=OSError('SECRET')))
+        with self.assertRaises(InstagramCollectionError) as caught:
+            provider.fetch_recent('one', 1)
+        self.assertEqual(caught.exception.reason, 'checkpoint')
+        self.assertTrue(caught.exception.stop_run)
+        self.assertEqual(browser.page.visits, [])
+
+    def test_ordinary_paths_and_hidden_inputs_are_not_login_or_challenge(self):
+        from .providers.instagram_browser import blocked_page
+        page = FakePage()
+        for path in ('/challenge.music/', '/checkpoint.events/', '/p/challengeShortcode/', '/reel/checkpointCode/'):
+            page.url = 'https://www.instagram.com' + path
+            self.assertIsNone(page_failure(page))
+            self.assertFalse(blocked_page(page))
+        original = page.locator
+        hidden = Mock()
+        hidden.count.return_value = 1
+        hidden.first.is_visible.return_value = False
+        page.locator = lambda selector: hidden if 'input[name=' in selector else original(selector)
+        self.assertIsNone(page_failure(page))
+        self.assertFalse(blocked_page(page))
 
     def test_instaloader_known_post_skips_metadata_access(self):
         provider=InstaloaderProvider();loader=Mock();provider.loader=loader

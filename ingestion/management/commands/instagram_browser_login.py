@@ -1,7 +1,9 @@
 from django.core.management.base import BaseCommand, CommandError
+import json
 
 from ingestion.providers.instagram import InstagramCollectionError
-from ingestion.providers.instagram_browser import InstagramBrowser, SESSION_REQUIRED, session_authenticated
+from ingestion.providers.instagram_browser import InstagramBrowser, SESSION_REQUIRED, session_authenticated, profile_configuration
+from ingestion.providers.instagram import configured_provider_name
 
 
 class Command(BaseCommand):
@@ -10,6 +12,9 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         browser = None
         try:
+            self.stdout.write('Login browser: ' + json.dumps(profile_configuration(headed_login=True)))
+            if configured_provider_name() != 'playwright':
+                self.stdout.write('Collection is explicitly configured for Instaloader, which cannot reuse this browser session. Use collect_instagram --provider playwright.')
             browser = InstagramBrowser(headed_login=True).start()
             browser.page.goto('https://www.instagram.com/', wait_until='domcontentloaded')
             self.stdout.write(

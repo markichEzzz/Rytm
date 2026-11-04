@@ -1,5 +1,6 @@
 """Dedicated persistent Chromium profile. Login/verification always belong to the user."""
 import os
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -35,11 +36,21 @@ def collection_headless():
     return value == 'true'
 
 
+def profile_configuration(*, headed_login=False):
+    """Comparable non-secret profile identity for login and collection diagnostics."""
+    return {'browser': 'persistent_chromium',
+            'profile_id': sha256(str(profile_directory()).encode()).hexdigest()[:12],
+            'mode': 'headed' if headed_login or not collection_headless() else 'headless',
+            'storage_state_file': 'not_used'}
+
+
 def blocked_page(page):
     parsed = urlparse(page.url)
+    inputs = page.locator('input[name="username"], input[name="password"]')
     return (parsed.hostname not in ('www.instagram.com', 'instagram.com')
-            or any(part in parsed.path for part in ('/accounts/login', '/challenge', '/checkpoint'))
-            or page.locator('input[name="username"], input[name="password"]').count() > 0)
+            or parsed.path.startswith('/accounts/login')
+            or any(parsed.path == '/' + route or parsed.path.startswith('/' + route + '/') for route in ('challenge', 'checkpoint'))
+            or inputs.count() > 0 and inputs.first.is_visible())
 
 
 def has_session_cookie(context):

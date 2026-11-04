@@ -89,6 +89,19 @@ def profile_diagnostics(page, username):
     }
 
 
+def failure_diagnostics(page, error, *, stage, status=None):
+    """Bounded, fixed-marker diagnostics; arbitrary titles/paths may contain secrets."""
+    title = page.title().strip()
+    generic_titles = {'Instagram', 'Login • Instagram', 'Log in • Instagram',
+                      'Page Not Found • Instagram', 'Error • Instagram', 'Вхід • Instagram'}
+    safe_url = safe_page_url(page.url)
+    return {'stage': stage, 'reason': error.reason,
+            'page_state_marker': getattr(error, 'marker', error.reason),
+            'current_url_path': urlparse(safe_url).path if safe_url.startswith('https://') else '[unexpected host]',
+            'page_title': title if title in generic_titles else '[non-generic title redacted]',
+            'navigation_http_status': status}
+
+
 def empty_profile_error(page, username):
     # Only call a profile private/unavailable when its own UI says so.
     private = page.get_by_text(re.compile(r'^(?:this account is private|цей (?:обліковий запис|акаунт) приватний)[.!]?$', re.I))

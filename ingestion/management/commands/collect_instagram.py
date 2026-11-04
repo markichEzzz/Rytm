@@ -1,4 +1,5 @@
 import logging
+import json
 import time
 from datetime import datetime, timezone as datetime_timezone
 
@@ -10,7 +11,8 @@ from django.utils import timezone
 from ingestion.models import SourceAccount
 from ingestion.instagram_policy import InstagramPolicy
 from ingestion.instagram_schedule import InstagramSchedule
-from ingestion.providers.instagram import MAX_LIMIT, InstagramCollector, InstagramCollectionError
+from ingestion.providers.instagram import (MAX_LIMIT, InstagramCollector, InstagramCollectionError,
+                                          selected_provider, configured_provider_name)
 from ingestion.providers.instagram_safety import MESSAGES
 from ingestion.services import store_collected_item
 
@@ -25,7 +27,8 @@ class Command(BaseCommand):
     help = 'Collect a small due-only window of public Instagram metadata; stop on access restrictions.'
 
     def add_arguments(self, parser):
-        parser.add_argument('--username', help='Enabled configured Instagram username (still honors scheduling/cooldowns).')
+        parser.add_argument('--username', '--source', dest='username', help='Enabled configured Instagram username (still honors scheduling/cooldowns).')
+        parser.add_argument('--provider', choices=['playwright', 'instaloader'], help='Explicit provider for this run; no automatic fallback.')
         parser.add_argument('--source-id', type=int, help='Enabled configured Instagram source PK.')
         parser.add_argument('--limit', '--limit-posts', dest='limit', type=int, default=None, help=f'Newest links scanned per source (1–{MAX_LIMIT}); --limit is the compatibility alias.')
         parser.add_argument('--limit-sources', type=int, help='Maximum due sources attempted (1–100).')
@@ -55,6 +58,13 @@ class Command(BaseCommand):
         self.result_status = 'not_started'
         try:
             policy = InstagramPolicy.load()
+            provider_name = options['provider'] or configured_provider_name()
+            self.stdout.write(f'Instagram provider: {provider_name}' +
+                              (' (uses the same persistent profile as instagram_browser_login).' if provider_name == 'playwright'
+                               else ' (does not use the instagram_browser_login browser session).'))
+            if provider_name == 'playwright' and (options['debug_browser'] or options['verbosity'] >= 2):
+                from ingestion.providers.instagram_browser import profile_configuration
+                self.stdout.write('Collection browser: ' + json.dumps(profile_configuration()))
             limit = options['limit'] if options['limit'] is not None else policy.max_posts
             source_limit = options['limit_sources'] if options['limit_sources'] is not None else policy.max_sources
             if not 1 <= limit <= MAX_LIMIT or not 1 <= source_limit <= 100:
@@ -82,6 +92,9 @@ class Command(BaseCommand):
                 if options['plan']:
                     for source in chosen:
                         self.stdout.write(f'Due source #{source.pk}: @{source.username}')
+                    for source in sources:
+                        if source not in due:
+                            self.stdout.write(f'Deferred source #{source.pk}: @{source.username}; due={timestamp(schedule.due_at(source))}.')
                     self.result_status = 'plan'
                     return
                 if not chosen:
@@ -91,8 +104,9 @@ class Command(BaseCommand):
                     self.stdout.write(f'Instagram status: pacing; next run not before {timestamp(schedule.data["pacing_until"])}. No requests made.')
                     self.result_status = 'pacing'
                     return
-                collector = InstagramCollector(limit=limit)
-                if options['debug_browser']:
+                collector = (InstagramCollector(limit=limit, provider=selected_provider(provider_name)) if options['provider']
+                             else InstagramCollector(limit=limit))
+                if options['debug_browser'] or options['verbosity'] >= 2 and provider_name == 'playwright':
                     if not hasattr(collector.provider, 'set_diagnostics'):
                         raise InstagramCollectionError('--debug-browser requires INSTAGRAM_COLLECTION_PROVIDER=playwright.', reason='configuration')
                     collector.provider.set_diagnostics(self.stdout.write)
@@ -137,6 +151,8 @@ class Command(BaseCommand):
                         # Fixed diagnostic code only: never emit provider exception/body/session details.
                         logger.warning('Instagram source #%s failed: reason=%s; stop_run=%s; committed raw items retained.', source.pk, reason, stop)
                         self.stderr.write(f'@{source.username}: reason={reason}; no retry; completed source commits retained.')
+                        if isinstance(error, InstagramCollectionError) and error.diagnostics:
+                            self.stderr.write('Instagram failure diagnostics: ' + json.dumps(error.diagnostics, ensure_ascii=False))
                         if stop:
                             self.stdout.write(f'Instagram stopped immediately: reason={reason}; cooldown until {timestamp(schedule.data["global_until"])}; remaining selected sources not attempted.')
                             break

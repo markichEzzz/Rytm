@@ -86,9 +86,12 @@ Other source failures back off exponentially: 1h, 2h, 4h, then 6h by default.
 If the configured base failure interval exceeds 6h, it remains the minimum/cap.
 No random delay, human-behavior imitation or evasion is used.
 
-The existing `INSTAGRAM_COLLECTION_PROVIDER` selection is preserved: its default
-is `instaloader`; set `playwright` explicitly for the manually authenticated
-browser. Existing dedicated browser profile/headless configuration is unchanged.
+`INSTAGRAM_COLLECTION_PROVIDER` now defaults to `playwright`, matching manual
+browser login. An explicit environment value is still honored. `--provider
+playwright` or `--provider instaloader` overrides selection for a single run,
+without editing environment files. Instaloader is an explicit legacy mode with
+its own trusted local authentication; it cannot reuse browser login. There is no
+automatic provider fallback. Existing browser profile/headless paths are unchanged.
 
 ### Durable state and migration decision
 
@@ -194,7 +197,9 @@ INSTAGRAM_COLLECTION_PROVIDER=playwright venv/bin/python manage.py collect_sourc
 
 CLI additions: `--limit-sources`, `--limit-posts` (alias of existing `--limit`),
 `--source-id`, `--plan`; existing `--username`, `--dry-run`, `--debug-browser` stay.
-`collect_sources --instagram-limit-sources N` changes only Instagram's source
+`--source` is an alias for `--username`. `--provider` selects a provider for one
+Instagram run. With Playwright, `-v 2` enables the sanitized browser diagnostics,
+as does `--debug-browser`. `collect_sources --instagram-limit-sources N` changes only Instagram's source
 budget. Omitted `collect_sources --limit` now respects each platform's own default;
 an explicit value is forwarded to both and must satisfy each selected platform's
 validation (Instagram rejects values above three). Python `call_command` callers
@@ -256,3 +261,144 @@ scheduling and challenge/rate-limit stop logic were unchanged in that follow-up.
 
 No migrations, extraction/schema/admin/API/Android changes, secrets changes,
 commits, pushes or deployments are part of this work.
+
+## Browser-session investigation (2026-11-04)
+
+### Confirmed root cause and live evidence
+
+The local environment did not explicitly set `INSTAGRAM_COLLECTION_PROVIDER`.
+The previous code therefore selected **Instaloader**, whereas
+`instagram_browser_login` authenticated **Playwright's persistent Chromium**.
+Successful browser login could not authenticate the default collector. This was
+a provider-selection defect, not a different directory within Playwright.
+
+A bounded diagnostic explicitly selected Playwright, the existing profile and
+the configured `festrepublic` source, with one post and `--dry-run`. The source
+profile and post both returned HTTP 200. Profile post/reel links were available;
+one post was normalized with caption, aware timestamp and image metadata. No
+challenge/checkpoint/rate limit was observed. Raw/source database writes were
+disabled: zero RawSourceItems created, no source checkpoint updated. Only local
+safety scheduling and Chromium's own persistent profile state were written.
+
+The historical reported generic error itself was not reproduced. The evidence
+confirms the authentication-stack mismatch and working current Playwright selectors;
+it does not establish Instagram's reason for any earlier Instaloader refusal.
+No HTML dump, caption, cookie/token, auth header or screenshot was saved as a
+diagnostic artifact. Live verification used only this one configured source.
+
+### Exact browser/session architecture
+
+Login and collection both construct `InstagramBrowser` and call the same
+`profile_directory()` helper. The default and locally observed directory is:
+
+```text
+/home/marko/.local/share/rytm-instagram-profile
+```
+
+`INSTAGRAM_PLAYWRIGHT_PROFILE_DIR` can supply another dedicated absolute path;
+every invocation must use the same OS user/configuration. Both launch Chromium
+with `launch_persistent_context(user_data_dir=...)`. There is no separate exported
+storage-state file or cookie-injection step. Login is always headed. Collection
+is headed by default; explicit `INSTAGRAM_PLAYWRIGHT_HEADLESS=true` changes only
+browser mode, not the user-data directory. Diagnostic `profile_id` hashes the
+resolved path so login/collection can be compared without printing profile files.
+
+Login prints its profile identity/mode and warns when collection is explicitly
+configured for Instaloader. Normal collection now chooses Playwright when unset
+and always identifies the selected provider. Explicit Instaloader remains supported
+but is never presented as consuming the browser session.
+
+### Failure states and observability
+
+Browser diagnostics distinguish `login_required`, `checkpoint`, `challenge`,
+`verification`, `rate_limit`, `temporary_block`, `access_blocked`,
+`profile_unavailable`, `private_profile`, `post_unavailable`, `navigation_timeout`
+and `unexpected_structure`. Native Instaloader retains its earlier source-level
+codes (`not_found`, `private_account`, `unavailable`, `timeout`) where applicable.
+
+Failures carry a stage: browser launch, profile navigation, profile-link discovery,
+post navigation or post parsing. They include the sanitized current path, a fixed
+page-state marker, and navigation HTTP status when available. An Instagram API 429
+on a successful HTTP-200 document is recorded separately. Generic Instagram page
+titles may be shown; arbitrary/non-generic titles are redacted because they may
+contain private content. Query strings, challenge path tokens and response bodies
+are never emitted. Failure diagnostics appear in the command's error summary even
+without verbose mode. Diagnostic-output failures cannot mask a security refusal.
+
+Missing DOM/navigation selectors with a session cookie mean changed/unexpected
+structure or a navigation timeout, not proof of a challenge. Empty profiles require
+an explicit no-posts marker; known-ID-only windows are normal no-new-content
+successes. Security URL checks match actual route prefixes, so a shortcode or
+username containing `challenge`/`checkpoint` is not classified as security UI.
+Hidden username/password inputs alone are not evidence of a visible login form.
+
+The live run demonstrated the existing profile/reel link, caption, timestamp and
+image parsing paths work; no speculative selector rewrite was needed. Genuine
+security states still stop immediately, preserve committed progress and persist
+the existing 24-hour global cooldown. There is no retry/bypass flag or challenge
+automation. Private/unavailable profiles/posts retain the longer source backoff.
+
+### Operator commands and troubleshooting
+
+Use a configured enabled Instagram username; `kudypity_lviv` in an example does
+not automatically create an Instagram source. This checkout has `festrepublic`.
+Run from `/home/marko/RYTM/rytm-backend` with the existing configuration.
+
+Check selection/next due time without Instagram requests:
+
+```bash
+venv/bin/python manage.py collect_instagram --source festrepublic --limit-sources 1 --limit-posts 1 --provider playwright --plan -v 2
+```
+
+One-source live diagnostic without raw/source database writes:
+
+```bash
+venv/bin/python manage.py collect_instagram --source festrepublic --limit-sources 1 --limit-posts 1 --provider playwright --dry-run -v 2
+```
+
+To actually collect that bounded source, omit `--dry-run` once it is due. Normal
+browser collection retains the default two-source/two-post due-only budget:
+
+```bash
+venv/bin/python manage.py collect_instagram --provider playwright
+```
+
+The unqualified `venv/bin/python manage.py collect_instagram` now also defaults to
+Playwright unless an explicit environment setting selects another provider.
+Existing `--source-id`, `--username`, `--limit`, `--debug-browser`, scheduling,
+known-ID skips and no-history behavior remain available.
+
+If the provider line says Instaloader, use `--provider playwright` when relying
+on browser login. If profile IDs differ, correct the OS user/profile configuration.
+If login is required, use the normal manual headed login workflow and complete
+verification yourself before confirming it. If selectors fail, inspect the stage,
+marker and status instead of assuming a block. If a real challenge/rate limit
+appears, stop and honor the cooldown; do not repeat live probes. No secrets or
+environment files need editing to select a provider for one invocation.
+
+**Dry-run still persists safety scheduling.** The successful one-post preview
+scheduled this source six hours later. A post-test invocation must honor that due
+time and may correctly report zero attempts. This is not another authentication
+failure. No schedule deletion, interval reduction or alternate-source probing is
+used to force a second live request.
+
+### Final verification for this change
+
+- Full local PostGIS backend suite: **707 tests passed, zero failures/errors**;
+  normal test-database teardown completed. The focused Instagram/runtime selection
+  passed 89 tests before the additional diagnostic-output failure guard was added;
+  that guard's test is included in the final full-suite result.
+- `manage.py check`, Python syntax, whitespace and credential-pattern checks passed.
+- After tests, the one-source dry-run selected Playwright **without an environment
+  override**, reported `no_due_sources`, and made zero additional requests. The
+  existing schedule was honored (next due 2026-11-04 at 18:26 Europe/Kyiv). Raw item
+  count and the source's database checkpoint were unchanged.
+- No migration, extraction/Telegram/admin/Android changes, environment or credential
+  edits, production operations, commits or pushes were made.
+
+Changed files: `ingestion/providers/instagram.py`, `instagram_browser.py`,
+`instagram_playwright.py`, `instagram_safety.py`, `instagram_discovery.py` (all in
+the same providers directory), `ingestion/management/commands/collect_instagram.py`,
+`ingestion/management/commands/instagram_browser_login.py`,
+`ingestion/instagram_schedule.py`, `ingestion/test_instagram_playwright.py`,
+`ingestion/test_instagram_hardening.py`, and this guide.

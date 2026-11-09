@@ -75,6 +75,7 @@ class EventCandidate(PriceSemanticsMixin, models.Model):
     source_fingerprint = models.CharField(max_length=64, blank=True, default='', editable=False)
     title = models.CharField(max_length=255, blank=True)
     description = models.TextField(blank=True, help_text='Internal extraction draft. Public description is generated from facts on approval.')
+    public_description = models.TextField(blank=True, default='', help_text='Final moderator-edited text shown to users. Leave blank to generate it from event facts. Internal extraction notes are never included.')
     start_time = models.DateTimeField(null=True, blank=True)
     end_time = models.DateTimeField(null=True, blank=True)
     venue_name = models.CharField(max_length=255, blank=True)

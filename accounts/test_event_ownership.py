@@ -71,7 +71,7 @@ class EventOwnershipTests(APITestCase):
         candidate = self.submit(); model_admin = EventCandidateAdmin(EventCandidate, admin.site)
         request = RequestFactory().get('/'); request.user=self.reviewer
         self.assertIn('submitted_by', model_admin.get_readonly_fields(request, candidate))
-        self.assertEqual(model_admin.public_description(candidate), candidate.description)
+        self.assertEqual(model_admin.generated_description(candidate), candidate.description)
         self.client.force_login(self.reviewer)
         response=self.client.get(f'/admin/ingestion/eventcandidate/{candidate.pk}/change/')
         self.assertEqual(response.status_code, 200)

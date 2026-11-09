@@ -21,6 +21,13 @@ class EventCandidateAdminForm(forms.ModelForm):
             else:
                 kwargs['data'] = data
         super().__init__(*args, **kwargs)
+        if 'public_description' in self.fields:
+            from .services import final_candidate_description
+            self.fields['public_description'].label = 'Final public description'
+            self.fields['public_description'].widget = forms.Textarea(attrs={'rows': 7, 'cols': 90})
+            self.initial.setdefault('public_description', '')
+            if not self.instance.public_description:
+                self.initial['public_description'] = final_candidate_description(self.instance)
         if 'public_photo' in self.fields:
             self.fields['public_photo'].help_text = (
                 'Upload a photo you own or have permission to publish, or authorize the source image below. '
@@ -37,6 +44,11 @@ class EventCandidateAdminForm(forms.ModelForm):
 
     def clean(self):
         cleaned = super().clean()
+        # Display generated copy as a starting point without freezing it when the
+        # moderator only changes facts. Only an actual text edit stores an override.
+        if ('public_description' in cleaned and not self.instance.public_description
+                and cleaned['public_description'] == self.initial.get('public_description', '').strip()):
+            cleaned['public_description'] = ''
         if 'price_status' in cleaned:
             try:
                 cleaned['price'] = normalize_price(cleaned['price_status'], cleaned.get('price'))

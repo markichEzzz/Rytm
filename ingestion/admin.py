@@ -141,13 +141,13 @@ class EventCandidateAdmin(admin.ModelAdmin):
     form = EventCandidateAdminForm
     fieldsets = (
         ('Approval readiness', {'fields': ('completion_warning', 'confirm_extraction_review')}),
-        ('Event facts', {'fields': ('title', 'description', 'start_time', 'end_time', 'category', 'price_status', 'price')}),
+        ('Event facts', {'fields': ('title', 'public_description', 'start_time', 'end_time', 'category', 'price_status', 'price')}),
         ('Location', {'fields': ('venue_name', 'address', 'address_provenance', 'location_provenance', 'location_picker', ('latitude', 'longitude'))}),
         ('Publication photo', {'fields': ('source_image_preview', 'public_photo', 'use_source_image_as_public_photo',
              'source_photo_authorized_by', 'source_photo_authorized_at')}),
-        ('Review', {'fields': ('submitted_by', 'confidence', 'extraction_notes', 'status', 'event', 'reviewed_by', 'reviewed_at', 'possible_duplicate', 'public_description')}),
+        ('Review', {'fields': ('submitted_by', 'confidence', 'extraction_notes', 'status', 'event', 'reviewed_by', 'reviewed_at', 'possible_duplicate', 'generated_description')}),
         ('Source reference (private)', {'classes': ('collapse',), 'fields': ('raw_source_item', 'source_account', 'source_post',
-             'source_fingerprint', 'sibling_candidates', 'source_url', 'source_image_url', 'raw_source_text', 'raw_image_text', 'semantic_extraction', 'poster_diagnostics', 'created_at', 'updated_at')}),
+             'source_fingerprint', 'sibling_candidates', 'source_url', 'source_image_url', 'description', 'raw_source_text', 'raw_image_text', 'semantic_extraction', 'poster_diagnostics', 'created_at', 'updated_at')}),
     )
 
     @admin.display(description='Select location')
@@ -196,7 +196,7 @@ class EventCandidateAdmin(admin.ModelAdmin):
     search_fields = ('title', 'address', 'raw_source_item__source_account__username')
     autocomplete_fields = ('raw_source_item',)
     readonly_fields = ('completion_warning', 'submitted_by', 'status', 'event', 'reviewed_at', 'reviewed_by', 'created_at', 'updated_at',
-                       'source_photo_authorized_at', 'source_photo_authorized_by', 'address_provenance', 'location_provenance', 'location_picker', 'source_image_preview', 'source_account', 'source_fingerprint', 'source_post', 'sibling_candidates', 'raw_source_text', 'raw_image_text', 'semantic_extraction', 'poster_diagnostics', 'public_description', 'possible_duplicate')
+                       'source_photo_authorized_at', 'source_photo_authorized_by', 'address_provenance', 'location_provenance', 'location_picker', 'source_image_preview', 'source_account', 'source_fingerprint', 'source_post', 'sibling_candidates', 'raw_source_text', 'raw_image_text', 'semantic_extraction', 'poster_diagnostics', 'generated_description', 'possible_duplicate')
     actions = ('resolve_location', 'approve_selected', 'reject_selected', 'mark_duplicate', 'return_to_review')
 
     @admin.display(description='Approval readiness')
@@ -265,7 +265,7 @@ class EventCandidateAdmin(admin.ModelAdmin):
         return RawSourceItemAdmin(RawSourceItem, self.admin_site).poster_diagnostics(obj.raw_source_item) if obj and obj.raw_source_item_id else '—'
 
     @admin.display(description='Public description generated from facts')
-    def public_description(self, obj):
+    def generated_description(self, obj):
         return (build_candidate_description(obj) if obj.raw_source_item_id else obj.description) if obj else ''
 
     @admin.display(description='Possible duplicate')
@@ -277,7 +277,7 @@ class EventCandidateAdmin(admin.ModelAdmin):
     def get_readonly_fields(self, request, obj=None):
         fields = super().get_readonly_fields(request, obj)
         if obj and obj.status == EventCandidate.Status.APPROVED:
-            fields += ('confirm_extraction_review', 'raw_source_item', 'title', 'description', 'start_time', 'end_time', 'venue_name',
+            fields += ('confirm_extraction_review', 'raw_source_item', 'title', 'description', 'public_description', 'start_time', 'end_time', 'venue_name',
                        'address', 'latitude', 'longitude', 'price', 'price_status', 'category', 'source_url',
                        'source_image_url', 'public_photo', 'use_source_image_as_public_photo', 'confidence', 'extraction_notes')
         return fields

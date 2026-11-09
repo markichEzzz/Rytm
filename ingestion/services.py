@@ -87,6 +87,13 @@ def build_candidate_description(candidate):
     return ' '.join(parts)
 
 
+def final_candidate_description(candidate):
+    """Moderator-owned public copy takes priority; extraction drafts stay private."""
+    return candidate.public_description.strip() or (
+        build_candidate_description(candidate) if candidate.raw_source_item_id else candidate.description.strip()
+    )
+
+
 def extraction_warnings(candidate):
     warnings = []
     for line in candidate.extraction_notes.splitlines():
@@ -194,7 +201,7 @@ def approve_candidate(candidate, reviewer):
                     Event.objects.filter(pk=record.event_id).update(status='rejected')
             else:
                 event = Event(
-                    title=record.title.strip(), description=build_candidate_description(record) if record.raw_source_item_id else record.description.strip(),
+                    title=record.title.strip(), description=final_candidate_description(record),
                     start_time=record.start_time, end_time=record.end_time,
                     address=record.address.strip(), location=Point(record.longitude, record.latitude, srid=4326),
                     price=record.price, price_status=record.price_status, category=record.category,

@@ -5,7 +5,7 @@ from decimal import Decimal
 from io import StringIO
 import json
 import os
-from threading import Barrier
+from threading import Barrier, current_thread
 from unittest.mock import Mock, patch
 
 from django.contrib import admin
@@ -343,6 +343,7 @@ class ConcurrentExtractionTests(TransactionTestCase):
         source = SourceAccount.objects.create(username='festrepublic')
         raw = RawSourceItem.objects.create(source_account=source, external_id='concurrent', source_url='https://example.com/post', raw_text='messy concert')
         barrier = Barrier(2)
+        worker_resources = []
         def extract(pk):
             close_old_connections()
             try:
@@ -353,9 +354,16 @@ class ConcurrentExtractionTests(TransactionTestCase):
                 provider.extract.side_effect = response
                 return extract_raw_source_item(RawSourceItem.objects.select_related('source_account').get(pk=pk), provider=provider).action
             finally:
+                # Keep physical handles alive so GC cannot hide a worker connection leak.
+                worker_resources.append((current_thread(), [connection.connection for connection in
+                    connections.all(initialized_only=True) if connection.connection is not None]))
                 connections.close_all()
                 self.assertTrue(all(connection.connection is None for connection in connections.all(initialized_only=True)))
         with patch.dict(connections['default'].settings_dict, {'CONN_MAX_AGE': 600}), ThreadPoolExecutor(max_workers=2) as executor:
             actions = list(executor.map(extract, [raw.pk, raw.pk]))
+        self.assertEqual(len(worker_resources), 2)
+        self.assertTrue(all(handles for _, handles in worker_resources))
+        self.assertTrue(all(not thread.is_alive() for thread, _ in worker_resources))
+        self.assertTrue(all(handle.closed for _, handles in worker_resources for handle in handles))
         self.assertEqual(sorted(actions), ['created', 'skipped'])
         self.assertEqual(EventCandidate.objects.count(), 1)

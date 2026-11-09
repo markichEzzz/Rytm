@@ -67,12 +67,12 @@ class IngestionTests(TestCase):
         self.source.save()
         call_command('seed_source_accounts', stdout=StringIO())
         call_command('seed_source_accounts', stdout=StringIO())
-        self.assertEqual(SourceAccount.objects.count(), 21)
+        self.assertEqual(SourceAccount.objects.count(), 16)
         self.source.refresh_from_db()
         self.assertFalse(self.source.enabled)
         self.assertEqual(self.source.display_name, 'Edited name')
         self.assertTrue(SourceAccount.objects.filter(username='les_kurbas_theatre').exists())
-        self.assertTrue(SourceAccount.objects.filter(username='leskurbastheatre').exists())
+        self.assertFalse(SourceAccount.objects.filter(username='leskurbastheatre').exists())
 
     def test_raw_ingestion_idempotent_preserves_first_snapshot(self):
         item = CollectedSourceItem('post-1', 'https://example.com/changed', raw_text='changed')
@@ -286,7 +286,7 @@ class IngestionTests(TestCase):
 class ConcurrentApprovalTests(TransactionTestCase):
     def test_parallel_cross_account_approvals_create_one_event(self):
         from concurrent.futures import ThreadPoolExecutor
-        from threading import Barrier
+        from threading import Barrier, current_thread
         from django.db import close_old_connections, connections
 
         reviewer = get_user_model().objects.create_superuser('concurrent-reviewer', 'reviewer@example.com', None)
@@ -301,6 +301,7 @@ class ConcurrentApprovalTests(TransactionTestCase):
                 public_photo='candidate_photos/owned.jpg',
             ))
         barrier = Barrier(2)
+        worker_resources = []
 
         def approve(pk):
             close_old_connections()
@@ -313,11 +314,18 @@ class ConcurrentApprovalTests(TransactionTestCase):
                 except ValidationError:
                     return False
             finally:
+                # Keep physical handles alive so GC cannot hide a worker connection leak.
+                worker_resources.append((current_thread(), [connection.connection for connection in
+                    connections.all(initialized_only=True) if connection.connection is not None]))
                 connections.close_all()
                 self.assertTrue(all(connection.connection is None for connection in connections.all(initialized_only=True)))
 
         with patch.dict(connections['default'].settings_dict, {'CONN_MAX_AGE': 600}), ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(approve, [candidate.pk for candidate in candidates]))
+        self.assertEqual(len(worker_resources), 2)
+        self.assertTrue(all(handles for _, handles in worker_resources))
+        self.assertTrue(all(not thread.is_alive() for thread, _ in worker_resources))
+        self.assertTrue(all(handle.closed for _, handles in worker_resources for handle in handles))
         self.assertEqual(sorted(results), [False, True])
         self.assertEqual(Event.objects.count(), 1)
         self.assertEqual(sorted(EventCandidate.objects.values_list('status', flat=True)), ['approved', 'duplicate'])

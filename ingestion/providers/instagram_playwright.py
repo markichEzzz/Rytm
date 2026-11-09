@@ -9,9 +9,10 @@ from urllib.parse import urlparse
 from django.utils import timezone
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from ingestion.instagram_policy import InstagramPolicy
-from .instagram import InstagramCollectionError, MAX_LIMIT, RECENT_DAYS
+from .instagram import InstagramCollectionError, InstagramPostItems, MAX_LIMIT, RECENT_DAYS
+from ingestion.instagram_urls import canonical_profile_url
 from .instagram_browser import InstagramBrowser, session_authenticated, has_session_cookie
-from .instagram_html import normalize_post_html, post_identity, post_timestamp
+from .instagram_html import normalize_post_html, post_identity, post_timestamp, post_dom_candidates, post_candidate_diagnostics
 from .instagram_discovery import discover_profile_posts, profile_diagnostics, failure_diagnostics
 from .instagram_safety import page_failure, failure
 
@@ -78,7 +79,7 @@ class PlaywrightInstagramProvider:
         self.navigation_status = response.status if response else None
         self._check(browser, response.status if response else None)
         try:
-            browser.page.locator('main, article, [role="main"]').first.wait_for(state='attached', timeout=10000)
+            browser.page.locator('main, article, [role="main"], [role="dialog"]').first.wait_for(state='attached', timeout=10000)
             browser.page.locator('a[href*="/direct/"], a[href*="/accounts/edit"], a[href*="/accounts/activity"], a[href*="/your_activity"]').first.wait_for(state='attached', timeout=10000)
         except PlaywrightTimeoutError:
             self._check(browser)
@@ -96,7 +97,7 @@ class PlaywrightInstagramProvider:
             self.stage = 'browser_launch'
             browser = self._browser()
             self.stage = 'profile_navigation'
-            self._navigate(browser, f'https://www.instagram.com/{username}/')
+            self._navigate(browser, canonical_profile_url(username))
             try:
                 self.stage = 'profile_link_discovery'
                 posts = discover_profile_posts(browser.page, username, limit)
@@ -114,12 +115,13 @@ class PlaywrightInstagramProvider:
                 raise failure('unexpected_structure')
             cutoff = timezone.now() - timedelta(days=RECENT_DAYS)
             parsed_count = known_count = 0
-            last_post_error = None
+            skipped = 0
             for url in posts:
                 identity = post_identity(url)
                 if identity[0] in known_ids:
                     known_count += 1
                     continue
+                html, caption, published = '', '', None
                 try:
                     self.stage = 'post_navigation'
                     self._navigate(browser, url)
@@ -127,11 +129,10 @@ class PlaywrightInstagramProvider:
                     current = post_identity(browser.page.url)
                     if not current or current[0] != identity[0]:
                         raise failure('unexpected_structure')
-                    captions = browser.page.locator('main h1, article h1').all_text_contents()
-                    timestamps = browser.page.locator('time[datetime]').evaluate_all(
-                        '(elements) => elements.map(e => ({datetime: e.getAttribute("datetime"), href: e.closest("a")?.getAttribute("href")}))')
-                    item = normalize_post_html(url, browser.page.content(), caption=captions[0] if captions else '',
-                                               timestamp=post_timestamp(timestamps, url), username=username)
+                    caption, timestamps = post_dom_candidates(browser.page)
+                    published = post_timestamp(timestamps, current[1])
+                    html = browser.page.content()
+                    item = normalize_post_html(current[1], html, caption=caption, timestamp=published, username=username)
                     self._check(browser)
                     parsed_count += 1
                     self._diagnostics({'shortcode': item.external_id, 'post_kind': item.raw_metadata['post_kind'],
@@ -141,23 +142,25 @@ class PlaywrightInstagramProvider:
                         items.append(item)
                 except PlaywrightTimeoutError:
                     self._check(browser)
-                    last_post_error = failure('navigation_timeout', marker='post_navigation_timeout')
+                    skipped += 1
+                    self._diagnostics({**post_candidate_diagnostics(browser.page.url, html, caption=caption, timestamp=published),
+                                       'reason': 'navigation_timeout', 'result': 'skipped_post'})
                     logger.warning('Instagram post skipped: reason=navigation_timeout; no retry.')
                 except Exception as error:
                     if self.unavailable or self.restriction or (isinstance(error, InstagramCollectionError) and error.stop_run):
                         raise self.unavailable or self.restriction or error
                     reason = error.reason if isinstance(error, InstagramCollectionError) else 'unexpected_structure'
-                    if isinstance(error, InstagramCollectionError):
-                        last_post_error = error
+                    skipped += 1
+                    self._diagnostics({**post_candidate_diagnostics(browser.page.url, html, caption=caption, timestamp=published),
+                                       'reason': reason, 'result': 'skipped_post'})
                     logger.warning('Instagram post skipped: reason=%s; no retry.', reason)
             self._check(browser)
             self._diagnostics({'source_username': username, 'inspected_links': len(posts), 'known_links_skipped': known_count,
-                               'normalized_items': parsed_count, 'recent_items': len(items)})
+                               'normalized_items': parsed_count, 'recent_items': len(items), 'skipped_posts': skipped})
             if parsed_count == 0 and known_count == 0:
-                if last_post_error:
-                    raise last_post_error
-                raise InstagramCollectionError('None of the bounded Instagram posts had usable structures; no retry was made.')
-            return items
+                logger.warning('Instagram result=no_parseable_posts; inspected=%s; skipped=%s; no security refusal detected.', len(posts), skipped)
+                return InstagramPostItems(status='no_parseable_posts', inspected=len(posts), skipped=skipped)
+            return InstagramPostItems(items, inspected=len(posts), skipped=skipped)
         except InstagramCollectionError as error:
             error.partial_items = tuple(items)
             self._annotate_failure(error)

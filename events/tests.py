@@ -444,10 +444,11 @@ class ConcurrentSubmissionTests(APITransactionTestCase):
 
     def test_parallel_first_submissions_only_create_one_event(self):
         from concurrent.futures import ThreadPoolExecutor
-        from threading import Barrier
+        from threading import Barrier, current_thread
         from django.db import close_old_connections, connections
         user = User.objects.create_user(username='parallel')
         barrier = Barrier(2)
+        worker_resources = []
         with TemporaryDirectory() as media, override_settings(MEDIA_ROOT=media, STORAGES={
             'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
             'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
@@ -461,9 +462,16 @@ class ConcurrentSubmissionTests(APITransactionTestCase):
                     barrier.wait(timeout=10)
                     return client.post('/api/events/', data, format='multipart').status_code
                 finally:
+                    # Keep physical handles alive so GC cannot hide a worker connection leak.
+                    worker_resources.append((current_thread(), [connection.connection for connection in
+                        connections.all(initialized_only=True) if connection.connection is not None]))
                     connections.close_all()
                     self.assertTrue(all(connection.connection is None for connection in connections.all(initialized_only=True)))
             with patch.dict(connections['default'].settings_dict, {'CONN_MAX_AGE': 600}), ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(lambda _: submit(), range(2)))
+        self.assertEqual(len(worker_resources), 2)
+        self.assertTrue(all(handles for _, handles in worker_resources))
+        self.assertTrue(all(not thread.is_alive() for thread, _ in worker_resources))
+        self.assertTrue(all(handle.closed for _, handles in worker_resources for handle in handles))
         self.assertEqual(sorted(results), [201, 429])
         self.assertEqual(Event.objects.filter(submitted_by=user).count(), 1)

@@ -8,7 +8,7 @@ from .instagram_browser import blocked_page
 from .instagram_safety import page_failure
 from .instagram_html import recent_post_links, post_identity
 
-LINK_SELECTOR = 'a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]'
+LINK_SELECTOR = 'a[href*="/p/"], a[href*="/reel/"], a[href*="/reels/"]'
 HREFS_JS = '(elements) => elements.map(e => e.getAttribute("href"))'
 
 
@@ -48,7 +48,7 @@ def discover_profile_posts(page, username, limit):
     except PlaywrightTimeoutError:
         pass
     scoped = page.locator('main a[href], article a[href], [role="main"] a[href]').evaluate_all(HREFS_JS)
-    posts = recent_post_links(scoped, limit, username=username)
+    posts = recent_post_links(scoped, limit, username=username, allow_collaborations=True)
     if not posts:
         posts = recent_post_links(page.locator('a[href]').evaluate_all(HREFS_JS), limit, username=username)
     restriction = page_failure(page)

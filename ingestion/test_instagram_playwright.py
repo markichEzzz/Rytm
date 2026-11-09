@@ -253,12 +253,14 @@ class HtmlAndBrowserTests(SimpleTestCase):
         self.assertEqual(len(browser.page.visits), 3)
         provider.close()
 
-    def test_all_failed_posts_fail_clearly(self):
+    def test_all_failed_posts_are_a_visible_nonsecurity_window(self):
         browser = FakeBrowser()
         browser.page.bad_posts.update(['https://www.instagram.com/p/Good/', 'https://www.instagram.com/reel/Second/'])
         with patch('ingestion.providers.instagram_playwright.time.sleep'):
-            with self.assertRaisesMessage(InstagramCollectionError, 'usable structures'):
-                PlaywrightInstagramProvider(browser_factory=lambda: browser).fetch_recent('festrepublic', 2)
+            items = PlaywrightInstagramProvider(browser_factory=lambda: browser).fetch_recent('festrepublic', 2)
+        self.assertEqual(items, [])
+        self.assertEqual(items.collection_status, 'no_parseable_posts')
+        self.assertEqual(items.skipped_posts, 2)
 
     def test_rate_block_has_no_retry(self):
         browser = FakeBrowser()

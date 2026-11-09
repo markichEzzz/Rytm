@@ -180,11 +180,11 @@ Normal production browser collection (at most two due sources, two links each):
 INSTAGRAM_COLLECTION_PROVIDER=playwright venv/bin/python manage.py collect_instagram
 ```
 
-Explicitly process all currently due sources in this 21-account deployment,
+Explicitly process all currently due sources in this 16-account bundle,
 retaining pauses and all cooldowns:
 
 ```bash
-INSTAGRAM_COLLECTION_PROVIDER=playwright venv/bin/python manage.py collect_instagram --limit-sources 21
+INSTAGRAM_COLLECTION_PROVIDER=playwright venv/bin/python manage.py collect_instagram --limit-sources 16
 ```
 
 For deployments with more sources, the explicit per-run ceiling is 100; repeated
@@ -402,3 +402,157 @@ the same providers directory), `ingestion/management/commands/collect_instagram.
 `ingestion/management/commands/instagram_browser_login.py`,
 `ingestion/instagram_schedule.py`, `ingestion/test_instagram_playwright.py`,
 `ingestion/test_instagram_hardening.py`, and this guide.
+
+
+## Post-layout tolerance and current sources (2026-11-08)
+
+### Evidence and limits
+
+Operator-supplied diagnostics show authenticated HTTP-200 profiles with discovered
+post/reel links for `rumbambar.lviv` and `emily_resort`, followed by two unsupported
+post parses each. Other accounts parsed successfully. This localizes the reported
+failure to post parsing; it does not identify the exact affected DOM layout.
+No affected HTML fixtures were supplied, so attributing those failures specifically
+to reels, carousels or video markup would be speculation. No live Instagram
+requests, login, production seed or production data writes were made for this change.
+The live evidence described in the previous section is historical.
+
+Code inspection found restrictive assumptions: caption lookup only used main/article
+H1 elements; plural reel redirect paths were rejected; any non-post Open Graph
+canonical URL rejected otherwise usable caption data; invalid optional media could
+reject a captioned item; and two unsupported posts escalated to a source failure.
+Synthetic offline fixtures now exercise these assumptions. Actual affected-account
+compatibility remains to be confirmed later by a bounded operator run.
+
+### Canonical source configuration
+
+Bundled current usernames (operator-provided, without live verification):
+
+```text
+festrepublic
+malevich_concert_arena
+kotelnya.ruin.place
+kotelnya_
+cult_comedy_hall
+rumbambar.lviv
+emily_resort
+lollipop_projectsss
+lvivart.center
+dzyga.gallery
+les_kurbas_theatre
+urbancamp.lviv
+center.for.urban.history
+mad.lviv
+pravdabeer
+zankovetska.theatre
+```
+
+Profile URLs are generated/stored as `https://www.instagram.com/<username>/`.
+The canonicalizer removes query strings and fragments, including sharing parameters
+`obrf`, `cplk`, `srtk`, `rpxt`, `mdxt`, `vrfl`, `psln`, `xtok` and `exln`.
+It validates Instagram hosts and profile-only paths and rejects credential-bearing
+URLs. Collection constructs this canonical profile URL without using tracking data.
+
+`seed_source_accounts` adds missing bundled accounts, canonicalizes URLs on matching
+accounts, and deactivates only known obsolete bundled Instagram usernames. Matching
+is case-insensitive; existing enabled/disabled choices, display names, checkpoints,
+record identity and raw history are preserved. Custom accounts and Telegram sources
+are untouched. Thus the bundle has exactly 16 accounts; custom sources may coexist,
+and an operator-disabled current account is not automatically re-enabled.
+
+The obsolete bundled `cult.comedy.hall` is replaced by `cult_comedy_hall`.
+An existing old record is disabled, not renamed/deleted; historical raw provenance
+stays attached to it. The new account gets its own source record if missing.
+No production seed has been run. Future operator preview only:
+
+```bash
+venv/bin/python manage.py seed_source_accounts --dry-run
+```
+
+### Supported post data and extraction
+
+Only canonical `/p/<shortcode>/` and `/reel/<shortcode>/` URLs are opened.
+Input `/reels/<shortcode>/`, optional username prefixes, missing trailing slashes,
+query strings and fragments normalize to these forms. Same-shortcode post-to-reel
+redirects are accepted. Different-shortcode redirects/metadata remain rejected.
+Profile, explore, tagged, audio, comments and legacy `/tv/` anchors are ignored.
+Collaboration username prefixes are accepted in scoped profile content; global
+fallback discovery keeps its source-username filtering. Pinned/known links still
+consume the existing bounded scan window; no backfill or extra scrolling is added.
+
+Caption candidates come from semantic dialog/main/article H1/caption/description
+elements, structured `articleBody`/`caption`/`description`, Open Graph description,
+and standard description metadata. Arbitrary comments/body text is not a fallback.
+Carousel image lists and VideoObject/reel metadata are supported. A generic profile
+Open Graph URL alone is not post identity and no longer defeats a valid caption.
+Timestamp selection avoids adopting unrelated comment-link timestamps.
+
+Caption is primary grounded event evidence. Invalid/missing optional image URLs
+are omitted, preserving caption text and provenance. The current RawSourceItem
+contract already allows an empty image URL and missing timestamp: a useful caption
+with a known permalink can be stored without OCR/media. Missing facts are not
+invented. Caption collection does not guarantee the caption contains an event.
+
+The existing collector stores the caption in `RawSourceItem.raw_text`. Existing
+extractor `source_texts` reads raw text independently of OCR, so extraction code
+was left unchanged. Added integration tests cover caption-only storage/extraction
+and an irrelevant image whose OCR returns empty text. These database-backed tests
+require the local PostGIS service before they can be verified.
+
+### Unsupported posts and profile availability
+
+Each non-security post error increments `skipped_posts`, emits a fixed reason and
+safe candidate-presence diagnostics, then continues only within the original limit.
+A good post plus a bad post is successful with skipped-post visibility. If every
+inspected post is unsupported, the provider returns `no_parseable_posts`, rather
+than raising a source/security failure. The command reports this separately from
+ordinary no-new-content and failed-source counts. A mixed run uses
+`ok_with_skipped_posts`; an all-unsupported run uses `no_parseable_posts`.
+
+A non-dry-run completed unsupported window updates the source checkpoint and uses
+the normal no-new-content interval (12 hours by default). It is not immediately
+retried, does not increment source failures and does not trigger global cooldown.
+Known/old posts retain existing duplicate/relevance handling. A genuine challenge,
+checkpoint, login failure or rate limit still stops immediately and preserves the
+existing global cooldown. Browser closure before ORM writes is unchanged.
+
+`profile_unavailable` remains a separate source-level failure with the existing
+longer backoff. For renamed accounts, update the username/source configuration;
+for permanently missing accounts, disable the source. Do not retry on every run.
+No availability detector or refusal behavior was weakened.
+
+Unsupported-post diagnostics contain only content kind, shortcode-parsed flag,
+caption/timestamp/media-candidate flags and a path class such as
+`/reel/<shortcode>/`. They never print captions, private media URLs, HTML, query
+parameters, cookies or session secrets. Candidate presence does not prove validity.
+
+### Later operator verification (not executed during this task)
+
+From `/home/marko/RYTM/rytm-backend`, after reviewing source configuration and
+honoring existing due times/cooldowns, run one bounded preview:
+
+```bash
+venv/bin/python manage.py collect_instagram --source rumbambar.lviv --provider playwright --limit-sources 1 --limit-posts 1 --dry-run -v 2
+```
+
+This is a live request when an eligible source is selected. Dry-run avoids raw-item
+and source-checkpoint writes but still persists safety scheduling. Do not bypass
+cooldowns to force it. Normal due-only collection remains:
+
+```bash
+venv/bin/python manage.py collect_instagram --provider playwright
+```
+
+### Offline verification for this change
+
+- All 180 database-independent backend tests passed (74 Instagram-focused), including the new URL,
+  layout, safe-diagnostic and command-result cases. Browser/network access is mocked.
+- Focused database-backed tests and the full backend suite were attempted with an
+  explicit development/loopback database configuration. Both stopped at database
+  creation because `127.0.0.1:5432` refused connections. The full run discovered
+  726 tests before two additional offline regressions were added (728 now discovered).
+  The previous 707-pass result above is historical, not a result for this change.
+- Direct caption-to-extractor and empty-OCR checks passed without database access.
+  Seed persistence and caption-to-extractor storage integration tests remain unverified
+  until the local PostGIS service is available. Docker was not started; production
+  was not contacted. No migration or extraction/Telegram/Android change is needed.

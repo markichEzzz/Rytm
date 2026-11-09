@@ -293,6 +293,20 @@ class OfflineCommandTests(SimpleTestCase):
         self.factory.assert_not_called()
         self.store.assert_not_called()
 
+    def test_unsupported_window_is_separate_from_source_failure_and_no_new(self):
+        from .providers.instagram import InstagramPostItems
+        self.sources = self.sources[:1]
+        self.collector.fetch_items.return_value = InstagramPostItems(status='no_parseable_posts', inspected=2, skipped=2)
+        self.store.return_value = (0, 0)
+        output = self.run_command()
+        self.assertIn('Instagram status: no_parseable_posts', output)
+        self.assertIn('Failures: 0', output)
+        self.assertIn('No new posts: 0', output)
+        self.assertIn('Posts skipped: 2', output)
+        self.store.assert_called_once()
+        self.assertTrue(self.store.call_args.kwargs['completed'])
+        self.assertIn('Instagram status: no_due_sources', self.run_command())
+
     def test_default_limit_and_durable_rotation_of_due_sources(self):
         self.assertIn('selected: 2; deferred: 19', self.run_command())
         self.factory.assert_called_once_with(limit=2)

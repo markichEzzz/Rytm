@@ -15,6 +15,15 @@ MAX_LIMIT = 3
 RECENT_DAYS = 14
 
 
+class InstagramPostItems(list):
+    """List-compatible result with explicit per-post outcomes, not security failures."""
+    def __init__(self, items=(), *, status='ok', inspected=0, skipped=0):
+        super().__init__(items)
+        self.collection_status = status
+        self.inspected_posts = inspected
+        self.skipped_posts = skipped
+
+
 class InstagramCollectionError(Exception):
     """Fixed diagnostic code and optional normalized progress, never raw responses."""
     def __init__(self, message, *, reason='unexpected_structure', stop_run=False, partial_items=(), diagnostics=None):

@@ -53,7 +53,8 @@ class Command(BaseCommand):
         return created, existing
 
     def handle(self, *args, **options):
-        counts = dict(attempted=0, fetched=0, created=0, existing=0, successful=0, no_new=0, failed=0)
+        counts = dict(attempted=0, fetched=0, created=0, existing=0, successful=0, no_new=0, failed=0,
+                      no_parseable=0, posts_skipped=0)
         collector = None
         self.result_status = 'not_started'
         try:
@@ -121,6 +122,8 @@ class Command(BaseCommand):
                         if len(items) > limit:
                             raise InstagramCollectionError('Provider returned more items than the requested limit.', reason='invalid_items')
                         counts['fetched'] += len(items)
+                        post_status = getattr(items, 'collection_status', 'ok')
+                        counts['posts_skipped'] += getattr(items, 'skipped_posts', 0)
                         if options['dry_run']:
                             ids = set(source.raw_items.values_list('external_id', flat=True))
                             new = sum(item.external_id not in ids for item in items)
@@ -131,8 +134,10 @@ class Command(BaseCommand):
                             counts['existing'] += old
                         schedule.complete(source, new)
                         counts['successful'] += 1
-                        counts['no_new'] += int(new == 0)
-                        self.stdout.write(f'@{source.username}: {len(items)} fetched, {new} new, {old} existing' + (' (dry-run; DB unchanged).' if options['dry_run'] else '.'))
+                        counts['no_parseable'] += int(post_status == 'no_parseable_posts')
+                        counts['no_new'] += int(new == 0 and post_status != 'no_parseable_posts')
+                        self.stdout.write(f'@{source.username}: {len(items)} fetched, {new} new, {old} existing; '
+                                          f'status={post_status}; skipped_posts={getattr(items, "skipped_posts", 0)}' + (' (dry-run; DB unchanged).' if options['dry_run'] else '.'))
                     except Exception as error:
                         reason = error.reason if isinstance(error, InstagramCollectionError) else ('invalid_items' if isinstance(error, ValidationError) else 'internal_error')
                         stop = isinstance(error, InstagramCollectionError) and error.stop_run
@@ -156,7 +161,9 @@ class Command(BaseCommand):
                         if stop:
                             self.stdout.write(f'Instagram stopped immediately: reason={reason}; cooldown until {timestamp(schedule.data["global_until"])}; remaining selected sources not attempted.')
                             break
-                self.result_status = 'partial_failure' if counts['failed'] else 'ok'
+                self.result_status = ('partial_failure' if counts['failed'] else
+                                      'no_parseable_posts' if counts['successful'] and counts['no_parseable'] == counts['successful'] else
+                                      'ok_with_skipped_posts' if counts['posts_skipped'] else 'ok')
         except InstagramCollectionError as error:
             self.result_status = error.reason
             # Configuration/state messages are fixed strings; include no supplied values/paths.
@@ -168,5 +175,6 @@ class Command(BaseCommand):
             self.stdout.write(f'Processed sources: {counts["attempted"]}\nFetched items: {counts["fetched"]}\nNew RawSourceItems: {counts["created"]}\n'
                               f'Existing items skipped: {counts["existing"]}\nFailures: {counts["failed"]}\nSources attempted: {counts["attempted"]}\n'
                               f'Successful: {counts["successful"]}\nNo new posts: {counts["no_new"]}\nFailed: {counts["failed"]}\nRaw items created: {counts["created"]}\nInstagram status: {self.result_status}')
+            self.stdout.write(f'No parseable post windows: {counts["no_parseable"]}\nPosts skipped: {counts["posts_skipped"]}')
         if counts['failed']:
             raise CommandError('Instagram collection ended with failures/partial progress; committed raw items retained.')

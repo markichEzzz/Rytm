@@ -31,7 +31,7 @@ class DiscoveryTests(SimpleTestCase):
             ('<div role="main"><a href="/festrepublic/p/P/"></a><a href="https://www.instagram.com/festrepublic/reel/R/?igsh=PRIVATE"></a></div>',
              ['https://www.instagram.com/p/P/', 'https://www.instagram.com/reel/R/']),
             ('<a href="/p/P/"></a><a href="/festrepublic/p/P/?tracking=1"></a>', ['https://www.instagram.com/p/P/']),
-            ('<a href="https://www.instagram.com/tv/T/"></a>', ['https://www.instagram.com/tv/T/']),
+            ('<a href="https://www.instagram.com/tv/T/"></a>', []),
             ('<header>empty profile</header>', []),
             ('<a href="/another/reel/R/"></a><a href="https://evil.example/p/P/"></a>', []),
         )

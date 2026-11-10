@@ -4,7 +4,7 @@ from .models import TourRoute, TourRouteStop
 class RouteStopSerializer(serializers.ModelSerializer):
     class Meta:
         model = TourRouteStop
-        fields = ['id', 'order', 'title', 'description', 'latitude', 'longitude', 'address', 'image_url', 'recommended_stop_minutes']
+        fields = ['id', 'order', 'title', 'description', 'latitude', 'longitude', 'address', 'image_url', 'source_url', 'recommended_stop_minutes']
 
 class RouteSerializer(serializers.ModelSerializer):
     distance_meters = serializers.FloatField(read_only=True)

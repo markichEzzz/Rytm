@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.db import models
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator, MaxValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator, URLValidator
 
 class RouteType(models.TextChoices):
     CULTURE = 'culture', 'Культурний'
@@ -72,6 +72,7 @@ class TourRouteStop(models.Model):
     longitude = models.FloatField(validators=[MinValueValidator(-180), MaxValueValidator(180)])
     address = models.CharField(max_length=255, blank=True)
     image_url = models.URLField(blank=True, max_length=2048)
+    source_url = models.URLField(blank=True, default="", max_length=2048, validators=[URLValidator(schemes=["http", "https"])])
     recommended_stop_minutes = models.PositiveIntegerField(default=0)
 
     class Meta:

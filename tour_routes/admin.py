@@ -17,6 +17,7 @@ class RouteStopInline(admin.StackedInline):
     formset=RouteStopFormSet
     extra=1
     ordering=['order']
+    fields=['order','title','description','address','latitude','longitude','image_url','source_url','recommended_stop_minutes']
 
 @admin.register(TourRoute)
 class TourRouteAdmin(admin.ModelAdmin):

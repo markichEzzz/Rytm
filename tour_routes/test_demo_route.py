@@ -34,13 +34,14 @@ class DemoRouteTests(APITestCase):
         route = self.seed()
         ids = list(route.stops.values_list('pk', flat=True))
         route.title = 'Edited demo'; route.save()
-        stop = route.stops.first(); stop.latitude = 0; stop.save()
+        stop = route.stops.first(); stop.latitude = 0; stop.source_url = 'https://example.org/edited'; stop.save()
         again = self.seed()
         self.assertEqual(route.pk, again.pk)
         self.assertEqual(TourRoute.objects.count(), 1)
         self.assertEqual(list(again.stops.values_list('pk', flat=True)), ids)
         self.assertEqual(again.title, TITLE)
         self.assertEqual(again.stops.first().latitude, STOPS[0]['latitude'])
+        self.assertEqual(list(again.stops.values_list('source_url', flat=True)), [s['source_url'] for s in STOPS])
         self.assertEqual(TourRouteStop.objects.count(), 4)
 
     def test_does_not_modify_other_routes_or_stops(self):
@@ -95,6 +96,26 @@ class DemoRouteTests(APITestCase):
             with self.assertRaises(RuntimeError): self.seed()
         self.assertEqual(TourRoute.objects.count(), 0)
         self.assertEqual(TourRouteStop.objects.count(), 0)
+
+    def test_seed_success_and_failure_leave_no_additional_database_sessions(self):
+        connection = connections['default']
+
+        def other_sessions():
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_stat_clear_snapshot()")
+                cursor.execute("SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
+                               "AND backend_type = 'client backend' AND pid <> pg_backend_pid()")
+                return {row[0] for row in cursor.fetchall()}
+
+        before = other_sessions()
+        physical_connection = connection.connection
+        self.seed()
+        self.seed()
+        with patch.object(TourRoute, 'validate_for_publication', side_effect=RuntimeError('validation failed')):
+            with self.assertRaises(RuntimeError): self.seed()
+        # Seeding uses the caller's connection/atomic scope, not a worker or raw client.
+        self.assertIs(connection.connection, physical_connection)
+        self.assertEqual(other_sessions(), before)
 
     def test_nonlocal_database_requires_explicit_operator_flag_before_queries(self):
         connection = connections['default']

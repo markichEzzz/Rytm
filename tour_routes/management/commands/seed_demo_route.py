@@ -1,6 +1,7 @@
 """One reviewed, public Lviv walking route; no network calls or schema changes."""
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connections, transaction
+from rytm.test_runner import is_runner_test_database
 
 from tour_routes.models import Difficulty, RouteType, TourRoute, TourRouteStop
 
@@ -20,7 +21,7 @@ STOPS = (
     dict(title='Домініканський собор', source_url='https://lia.lvivcenter.org/en/objects/dominican-church/', latitude=49.842778, longitude=24.034167,
          description='Колишній домініканський костел на Музейній площі відомий бароковим фасадом і купольним силуетом. Нині це храм Пресвятої Євхаристії. Роздивіться фасад із площі, перш ніж продовжити прогулянку до Підвальної.',
          address='Музейна площа, Львів', recommended_stop_minutes=10),
-    dict(title='Порохова вежа', source_url='https://www.lvivcenter.org/en/spatial/powder-tower-2/', latitude=49.842781, longitude=24.035561,
+    dict(title='Порохова вежа', source_url='https://lviv.travel/ua/places/attractions/porokhova-vezha', latitude=49.842781, longitude=24.035561,
          description='Порохова вежа на Підвальній — пам’ятка оборонної архітектури XVI століття. Вона була частиною міських укріплень. Роздивіться масивні кам’яні стіни та порівняйте вежу з цивільними будівлями історичного центру.',
          address='вулиця Підвальна, 4, Львів', recommended_stop_minutes=10),
 )
@@ -35,9 +36,10 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         # Guard before the first DB query: an operator's .env may point at production.
-        host = str(connections['default'].settings_dict.get('HOST') or '')
+        connection = connections['default']
+        host = str(connection.settings_dict.get('HOST') or '')
         local = host in {'', 'localhost', '127.0.0.1', '::1'} or host.startswith('/')
-        if not local and not options['allow_nonlocal_database']:
+        if not local and not is_runner_test_database(connection) and not options['allow_nonlocal_database']:
             raise CommandError('Non-local database refused. Select a local database, or after review '
                                'explicitly pass --allow-nonlocal-database. No data was changed.')
         with transaction.atomic():

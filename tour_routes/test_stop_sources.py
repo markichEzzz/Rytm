@@ -1,3 +1,4 @@
+from urllib.parse import urlsplit
 from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase
 from tour_routes.admin import RouteStopInline
@@ -27,9 +28,14 @@ class RouteStopSourceTests(SimpleTestCase):
                 field.clean(url, None)
 
     def test_all_demo_stops_have_reviewed_sources(self):
+        self.assertEqual(len(STOPS), 4)
+        for stop in STOPS:
+            parsed = urlsplit(stop["source_url"])
+            self.assertIn(parsed.scheme, {"http", "https"})
+            self.assertTrue(parsed.netloc)
         self.assertEqual([s['source_url'] for s in STOPS], [
             'https://lia.lvivcenter.org/en/objects/opera-house/',
             'https://lviv.travel/en/places/attractions/ploshcha-rinok',
             'https://lia.lvivcenter.org/en/objects/dominican-church/',
-            'https://www.lvivcenter.org/en/spatial/powder-tower-2/',
+            'https://lviv.travel/ua/places/attractions/porokhova-vezha',
         ])

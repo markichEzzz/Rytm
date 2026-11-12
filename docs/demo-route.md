@@ -240,3 +240,14 @@ Center for Urban History's historical interpretation of the tower, not a booking
 The captured JSON fixture was extended with these reviewed URL values; these additions are
 an expected post-migration/seed example, **not** a newly fetched database response. The local
 PostGIS server is currently unavailable, so the migration and new seed were not applied.
+
+
+## Source review — 2026-11-11
+
+All four existing source URLs were verified again. Opera, Rynok and Dominican stay unchanged.
+The Powder Tower's dated walk-event page was replaced with a dedicated official tourism
+article: https://lviv.travel/ua/places/attractions/porokhova-vezha .
+This reuses the existing source_url field and update_or_create seeding; no new migration.
+The fixtures represent the expected seed result, not a new live API capture. No seed was
+run against production. Tests now explicitly check four HTTP(S) links and restoration of
+source URLs on idempotent reruns.

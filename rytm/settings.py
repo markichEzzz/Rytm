@@ -287,3 +287,6 @@ if IS_PRODUCTION:
         'root': {'handlers': ['console'], 'level': 'INFO'},
         'loggers': {'django': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False}},
     }
+
+# Test-only DB provenance; does not change connection settings or production commands.
+TEST_RUNNER = "rytm.test_runner.RytmTestRunner"

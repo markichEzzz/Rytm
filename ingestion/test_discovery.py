@@ -50,12 +50,17 @@ class TelegramTests(TestCase):
         self.assertEqual(RawSourceItem.objects.count(),1)
 
     def test_telegram_text_uses_shared_extraction_and_unknown_price(self):
-        item=parse_public_page(HTML.replace('500 грн','Ціна невідома'),'test_channel',5)[0]
+        # This test exercises upcoming-event extraction, not expiry. Keep its
+        # explicit source date in the future instead of aging out every year.
+        event_date = (timezone.now() + timedelta(days=7)).strftime('%d.%m.%Y')
+        html = HTML.replace('11.11.2026', event_date).replace('500 грн', 'Ціна невідома')
+        item=parse_public_page(html,'test_channel',5)[0]
         raw,_=store_collected_item(self.source,item)
         raw.raw_image_url='';raw.raw_metadata['image_urls']=[];raw.save()
         outcome=extract_raw_source_item(raw)
         self.assertEqual(outcome.action,'created')
         self.assertEqual(outcome.candidate.category,'concert')
+        self.assertGreater(outcome.candidate.start_time, timezone.now())
         self.assertEqual((outcome.candidate.price_status,outcome.candidate.price),('unknown',None))
         self.assertFalse(outcome.candidate.public_photo)
 

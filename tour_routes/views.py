@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 from .models import TourRoute, RouteType, Difficulty
 from .distance import attach_distances
 from .serializers import RouteSerializer, RouteDetailSerializer, RouteSubmissionSerializer
+from rytm.throttling import SubmissionThrottle
 
 class RouteFilters(serializers.Serializer):
     q = serializers.CharField(required=False, allow_blank=True, max_length=200)
@@ -63,6 +64,7 @@ class RouteDetailView(APIView):
 
 
 class RouteSubmissionView(APIView):
+    throttle_classes = [SubmissionThrottle]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):

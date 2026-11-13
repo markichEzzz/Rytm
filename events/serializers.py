@@ -1,13 +1,13 @@
 from rest_framework import serializers
 from decimal import Decimal
-import math
 from django.utils import timezone
-from django.contrib.gis.geos import GEOSGeometry, Point, GEOSException
 from django.utils.dateparse import parse_datetime
 from datetime import datetime
 from .models import Event, Organizer
 from .pricing import infer_price_status, normalize_price
 from django.core.exceptions import ValidationError as DjangoValidationError
+from .uploads import EventPhotoField
+from .geometry import WGS84PointField
 
 class OrganizerSerializer(serializers.ModelSerializer):
     class Meta:
@@ -28,6 +28,9 @@ class AwareDateTimeField(serializers.DateTimeField):
         return super().to_internal_value(data)
 
 class EventSerializer(serializers.ModelSerializer):
+    description = serializers.CharField(max_length=20000)
+    photo = EventPhotoField()
+    location = WGS84PointField()
     organizer = serializers.SerializerMethodField()
     venue = serializers.SerializerMethodField()
 
@@ -71,20 +74,6 @@ class EventSerializer(serializers.ModelSerializer):
     def validate_price(self, value):
         if value is not None and value < Decimal('0'):
             raise serializers.ValidationError('Price must be non-negative.')
-        return value
-
-    def validate_location(self, value):
-        try:
-            value = value if isinstance(value, Point) else GEOSGeometry(value)
-        except (GEOSException, ValueError, TypeError):
-            raise serializers.ValidationError('Location must be a WGS84 POINT(longitude latitude).')
-        if (not isinstance(value, Point) or value.empty or value.hasz
-                or value.srid not in (None, 4326)):
-            raise serializers.ValidationError('Location must be a two-dimensional WGS84 point.')
-        if (not math.isfinite(value.x) or not math.isfinite(value.y)
-                or not -180 <= value.x <= 180 or not -90 <= value.y <= 90):
-            raise serializers.ValidationError('Location must contain valid longitude and latitude.')
-        value.srid = 4326
         return value
 
     def validate(self, attrs):

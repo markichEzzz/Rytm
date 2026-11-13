@@ -77,6 +77,7 @@ INSTALLED_APPS = [
     "cloudinary_storage",
 
     # Local apps
+    "rytm.apps.RytmConfig",
     "events",
     "tour_routes",
     "accounts.apps.AccountsConfig",
@@ -98,6 +99,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "rytm.middleware.AdminLoginThrottleMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -243,7 +245,19 @@ STORAGES = {
 # ============================================================
 
 REST_FRAMEWORK = {
-    "DEFAULT_THROTTLE_RATES": {"account_auth": "100/min"},
+    # Default ignores attacker-supplied X-Forwarded-For. Set only after the
+    # operator verifies the trusted reverse-proxy chain on the deployment.
+    "NUM_PROXIES": integer(os.getenv("THROTTLE_NUM_PROXIES", "0"), "THROTTLE_NUM_PROXIES", maximum=5),
+    "DEFAULT_THROTTLE_CLASSES": ["rytm.throttling.WriteThrottle"],
+    "DEFAULT_THROTTLE_RATES": {
+        "account_auth": "100/min", "api_write": "120/min",
+        "submission": "20/hour", "profile_write": "30/hour", "admin_login": "20/min",
+    },
+    "DEFAULT_PARSER_CLASSES": [
+        "rytm.parsers.BoundedJSONParser",
+        "rest_framework.parsers.FormParser",
+        "rest_framework.parsers.MultiPartParser",
+    ],
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),

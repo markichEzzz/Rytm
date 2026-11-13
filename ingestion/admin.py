@@ -229,7 +229,7 @@ class EventCandidateAdmin(admin.ModelAdmin):
         from .provenance import address_source
         return address_source(obj) or ('Existing address; verify manually.' if obj and obj.address else 'Unresolved.') if obj else 'Unresolved.'
 
-    @admin.action(description='Resolve location from venue/address (missing coordinates only)')
+    @admin.action(description='Resolve location from venue/address (missing coordinates only)', permissions=['change'])
     def resolve_location(self, request, queryset):
         for candidate in queryset:
             try:
@@ -299,19 +299,19 @@ class EventCandidateAdmin(admin.ModelAdmin):
                 self.message_user(request, f'Candidate #{candidate.pk}: {detail}', level=messages.WARNING)
         self.message_user(request, f'{count} candidates updated. See warnings for skipped items.')
 
-    @admin.action(description='Approve selected candidates')
+    @admin.action(description='Approve selected candidates', permissions=['change'])
     def approve_selected(self, request, queryset):
         self.moderate(request, queryset, EventCandidate.Status.APPROVED)
 
-    @admin.action(description='Reject selected candidates')
+    @admin.action(description='Reject selected candidates', permissions=['change'])
     def reject_selected(self, request, queryset):
         self.moderate(request, queryset, EventCandidate.Status.REJECTED)
 
-    @admin.action(description='Mark selected candidates as duplicate')
+    @admin.action(description='Mark selected candidates as duplicate', permissions=['change'])
     def mark_duplicate(self, request, queryset):
         self.moderate(request, queryset, EventCandidate.Status.DUPLICATE)
 
-    @admin.action(description='Return rejected/duplicate candidates to review')
+    @admin.action(description='Return rejected/duplicate candidates to review', permissions=['change'])
     def return_to_review(self, request, queryset):
         self.moderate(request, queryset, EventCandidate.Status.NEW)
 

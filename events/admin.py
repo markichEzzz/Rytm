@@ -1,5 +1,6 @@
 from django.contrib.gis import admin
 from .models import Organizer, Event
+from django.core.exceptions import PermissionDenied
 
 @admin.register(Organizer)
 class OrganizerAdmin(admin.ModelAdmin):
@@ -21,6 +22,8 @@ class EventAdmin(admin.GISModelAdmin):
     default_zoom = 12
 
     def set_status(self, request, queryset, status):
+        if not self.has_change_permission(request):
+            raise PermissionDenied
         # Save individually so the existing notification signal still runs.
         count = 0
         for event in queryset.exclude(status=status):
@@ -29,15 +32,15 @@ class EventAdmin(admin.GISModelAdmin):
             count += 1
         self.message_user(request, f'Updated {count} events.')
 
-    @admin.action(description='Approve selected events')
+    @admin.action(description='Approve selected events', permissions=['change'])
     def approve_selected(self, request, queryset):
         self.set_status(request, queryset, 'approved')
 
-    @admin.action(description='Mark selected events as pending')
+    @admin.action(description='Mark selected events as pending', permissions=['change'])
     def mark_pending(self, request, queryset):
         self.set_status(request, queryset, 'pending')
 
-    @admin.action(description='Reject selected events')
+    @admin.action(description='Reject selected events', permissions=['change'])
     def reject_selected(self, request, queryset):
         self.set_status(request, queryset, 'rejected')
 

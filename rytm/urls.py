@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.urls import path, include
 from rest_framework_simplejwt.views import TokenObtainPairView
+from rytm.throttling import AuthIPThrottle
 
 from accounts.views import ExistingAccountRefreshView
 from .public_views import legal_page, health
@@ -14,6 +15,6 @@ urlpatterns = [
     path('api/', include('accounts.urls')),
     
     # Ендпоінти для авторизації організаторів
-    path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/token/', TokenObtainPairView.as_view(throttle_classes=[AuthIPThrottle]), name='token_obtain_pair'),
     path('api/token/refresh/', ExistingAccountRefreshView.as_view(), name='token_refresh'),
 ]

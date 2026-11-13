@@ -1,5 +1,7 @@
 from django.contrib.gis.geos import Point
 from django.contrib.auth.models import User
+from django.contrib.auth.models import Permission
+from django.core.cache import cache
 from django.utils import timezone
 from datetime import timedelta
 from tempfile import TemporaryDirectory
@@ -12,6 +14,8 @@ from .models import Event, Organizer
 
 class EventAPITests(APITestCase):
     def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
         media = TemporaryDirectory()
         self.addCleanup(media.cleanup)
         storage = override_settings(
@@ -246,6 +250,8 @@ class EventAPITests(APITestCase):
 
 class EventSubmissionTests(APITestCase):
     def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
         media = TemporaryDirectory()
         self.addCleanup(media.cleanup)
         storage = override_settings(MEDIA_ROOT=media.name, STORAGES={
@@ -338,6 +344,7 @@ class EventSubmissionTests(APITestCase):
         self.assertIsNone(response.data['price'])
         self.assertIsNone(response.data['end_time'])
 
+    @patch.dict('rytm.throttling.SubmissionThrottle.THROTTLE_RATES', {'submission': '1000/hour'})
     def test_invalid_data_rejected_without_consuming_cooldown(self):
         cases = [
             {'title': ''}, {'description': ''}, {'address': ''}, {'category': 'unknown'},
@@ -423,6 +430,8 @@ class EventSubmissionTests(APITestCase):
         event = Event.objects.get(pk=self.submit().data['id'])
         event_admin = EventAdmin(Event, admin.site)
         request = RequestFactory().post('/admin/')
+        request.user = User.objects.create_user(username='moderator', is_staff=True)
+        request.user.user_permissions.add(Permission.objects.get(codename='change_event', content_type__app_label='events'))
         queryset = Event.objects.filter(pk=event.pk)
         with patch.object(event_admin, 'message_user'), patch('events.signals._send_approval_notification') as notify:
             with self.captureOnCommitCallbacks(execute=True):

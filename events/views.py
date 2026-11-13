@@ -8,6 +8,7 @@ from .models import Event
 from .serializers import EventSerializer
 from .moderation import create_submission
 from .search import filter_public_events
+from rytm.throttling import SubmissionThrottle
 
 
 class PrivateEventStateMixin:
@@ -19,6 +20,7 @@ class PrivateEventStateMixin:
         return response
 
 class EventListCreateView(PrivateEventStateMixin, generics.ListCreateAPIView):
+    throttle_classes = [SubmissionThrottle]
     serializer_class = EventSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
 

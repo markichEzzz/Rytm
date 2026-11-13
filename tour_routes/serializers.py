@@ -24,7 +24,7 @@ class RouteDetailSerializer(RouteSerializer):
 class SubmittedStopSerializer(serializers.Serializer):
     order = serializers.IntegerField(min_value=1)
     title = serializers.CharField(max_length=255)
-    description = serializers.CharField(required=False, allow_blank=True, default='')
+    description = serializers.CharField(max_length=4000, required=False, allow_blank=True, default='')
     address = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
     latitude = serializers.FloatField(min_value=-90, max_value=90)
     longitude = serializers.FloatField(min_value=-180, max_value=180)
@@ -38,7 +38,7 @@ class SubmittedStopSerializer(serializers.Serializer):
 
 class RouteSubmissionSerializer(serializers.ModelSerializer):
     title = serializers.CharField(max_length=255)
-    description = serializers.CharField()
+    description = serializers.CharField(max_length=20000)
     estimated_duration_minutes = serializers.IntegerField(min_value=1, max_value=2147483647)
     stops = SubmittedStopSerializer(many=True, min_length=2, max_length=100)
 

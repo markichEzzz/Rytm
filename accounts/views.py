@@ -9,7 +9,7 @@ from rest_framework import generics, status
 from rest_framework.exceptions import AuthenticationFailed, APIException
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
+from rytm.throttling import AuthIPThrottle, ProfileWriteThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from .google import verify_google_token
@@ -31,7 +31,7 @@ def credentials(user):
 
 class AuthView(APIView):
     permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [AuthIPThrottle]
     throttle_scope = 'account_auth'
 
 class RegisterView(AuthView):
@@ -124,6 +124,7 @@ class LogoutView(APIView):
         return Response(status=204)
 
 class OwnProfileView(generics.RetrieveUpdateAPIView):
+    throttle_classes = [ProfileWriteThrottle]
     permission_classes = [IsAuthenticated]
     serializer_class = OwnProfileSerializer
     http_method_names = ['get', 'patch', 'head', 'options']
@@ -158,4 +159,5 @@ class ExistingAccountRefreshSerializer(TokenRefreshSerializer):
             raise AuthenticationFailed('Account is unavailable.') from None
 
 class ExistingAccountRefreshView(TokenRefreshView):
+    throttle_classes = [AuthIPThrottle]
     serializer_class = ExistingAccountRefreshSerializer
